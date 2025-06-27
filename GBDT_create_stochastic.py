@@ -23,6 +23,7 @@ from ngboost.distns import LogNormal          # positive-only target
 import shap
 import matplotlib.pyplot as plt
 from scipy.stats import norm
+import time
 
 # ───────────────────────────── helper functions ──────────────────────────────
 def _mape_ignore_zero(y_true, y_pred):
@@ -168,6 +169,8 @@ class GBDT_Model:
         X, y = self._get_feature_targets(df_filt, drop_cols)
         pipe = self._build_pipeline(X)
 
+        t0 = time.perf_counter()
+
         if self.use_gridsearchcv:
             print("GridSearchCV in progress…")
             grid = GridSearchCV(
@@ -182,6 +185,9 @@ class GBDT_Model:
             print(f"Best params for {label}: {grid.best_params_}")
         else:
             best_model = pipe.fit(X, y)
+
+        fit_seconds = time.perf_counter() - t0
+        print(f"Training time for {label} model: {fit_seconds:.2f} s")
 
         # Optional CV diagnostics
         if self.use_kfold_insights:
@@ -204,12 +210,14 @@ class GBDT_Model:
                 scoring=scoring,
             )
             rmse = np.sqrt(-cv_res["test_mse"])
-            crps = -cv_res["test_crps"]     # flip sign back (lower = better)
+            crps = -cv_res["test_crps"]                    # flip sign back (lower = better)
+            mape = -cv_res["test_mape"] * 100              # convert from fraction to %
 
             print(
                 f"CV {label}: "
                 f"RMSE {rmse.mean():.2f}±{rmse.std(ddof=1):.2f}, "
                 f"MAE {-cv_res['test_mae'].mean():.2f}, "
+                f"MAPE {mape.mean():.2f}%±{mape.std(ddof=1):.2f}%, "  # <─ new
                 f"CRPS {crps.mean():.3f}±{crps.std(ddof=1):.3f}"
             )
 
@@ -422,31 +430,54 @@ class GBDT_Model:
         
 
 # ───────────────────────── single-row inference ─────────────────────────────
-def stochastic_gbdt_inference(row_idx: int = 0):
-    pipe = joblib.load("stochastic_gbdt_active.pkl")
-    df   = pd.read_csv("Data/Training/Features_all_dates.csv", parse_dates=["START_PICKING_TS"])
+def stochastic_gbdt_inference(row_idx: int = 0, use_active_model: bool = True):
+    "Inference performance and check on stochastic GBDT model"
 
-    if not 0 <= row_idx < len(df):
-        raise IndexError(f"Row index {row_idx} out of bounds for dataset of size {len(df)}.")
+    model_path = "stochastic_gbdt_active.pkl" if use_active_model else "stochastic_gbdt_inactive.pkl"
+    df_path = "Data/Training/Features_all_dates.csv"
+    label = "Active" if use_active_model else "Inactive"
 
-    row    = df.iloc[row_idx]
+    pipe = joblib.load(model_path)
+    df = pd.read_csv(df_path, parse_dates=["START_PICKING_TS"])
+
+    # Filter to evaluation period
+    eval_start = pd.Timestamp("2025-05-21")
+    eval_end   = pd.Timestamp("2025-05-27")
+    df = df[(df["START_PICKING_TS"] >= eval_start) & (df["START_PICKING_TS"] <= eval_end)]
+
+    if use_active_model:
+        df_eval = df[df["REMAINING_PICKING_TIME"] > 0].copy()
+    else:
+        df_eval = df[(df["REMAINING_PICKING_TIME"] > 0) & (df["PLANNED_TOTE_ID"] == "START")].copy()
+        df_eval = df_eval.drop(columns=["TIME_OF_DAY_MINS", "NR_OF_PICKERS", "NR_OF_PICKS"], errors="ignore")
+
+    if not 0 <= row_idx < len(df_eval):
+        raise IndexError(f"Row index {row_idx} out of bounds for {label} eval set with {len(df_eval)} rows.")
+
+    row = df_eval.iloc[row_idx]
     y_true = row["REMAINING_PICKING_TIME"]
-    X      = pd.DataFrame([row.drop("REMAINING_PICKING_TIME")])
+    X = pd.DataFrame([row.drop("REMAINING_PICKING_TIME")])
 
     preproc = pipe.named_steps["preprocessor"]
     ngb     = pipe.named_steps["regressor"]
-    dist    = ngb.pred_dist(preproc.transform(X))
+
+    # ── Measure prediction time ──
+    t0 = time.perf_counter()
+    X_trans = preproc.transform(X)
+    dist    = ngb.pred_dist(X_trans)
+    prediction_time = time.perf_counter() - t0
 
     mu, sigma = dist.loc[0], dist.scale[0]
     mean_, std_ = dist.mean()[0], dist.std()[0]
     crps_val   = crps_lognormal_cf(np.array([y_true]), np.array([mu]), np.array([sigma]))[0]
 
     print(
-        f"NGBoost inference (row {row_idx}):"
+        f"{label} NGBoost inference (row {row_idx}):"
         f"\n  ▸ true remaining time     : {y_true:.2f}"
         f"\n  ▸ predicted μ, σ (log-space): {mu:.4f}, {sigma:.4f}"
         f"\n  ▸ moments (mean, std)       : {mean_:.2f}, {std_:.2f}"
         f"\n  ▸ CRPS                      : {crps_val:.3f}"
+        f"\n  ▸ Prediction time           : {prediction_time:.4f} seconds"
     )
 
 # ───────────────────────── script entrypoint ────────────────────────────────
@@ -454,7 +485,7 @@ if __name__ == "__main__":
     model = GBDT_Model(
         big_csv_path="Data/Training/Features_all_dates.csv",
         use_gridsearchcv=False,
-        use_kfold_insights=False,
+        use_kfold_insights=True,
         eval_start="2025-05-21",
         eval_end  ="2025-05-27",
         param_grid={
@@ -463,11 +494,11 @@ if __name__ == "__main__":
         },
     )
 
-    stochastic_gbdt_inference(row_idx=2150779)  # change index as needed
-
     # Uncomment if you need to train
-    # model.train_models()
+    #model.train_models()
 
-    model.evaluate()
+    #model.evaluate()
 
-    model.plot_active_vs_running_completion()
+    #model.plot_active_vs_running_completion()
+
+    stochastic_gbdt_inference(row_idx=100, use_active_model=False)  # change index as needed

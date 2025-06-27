@@ -17,6 +17,7 @@ from sklearn.metrics import (
 )
 import shap
 import matplotlib.pyplot as plt
+import time
 
 
 def _mape_ignore_zero(y_true, y_pred):
@@ -174,7 +175,8 @@ class GBDT_Model:
         X, y = self._get_feature_targets(df_filtered, drop_cols)
         pipe = self._build_pipeline(X)
 
-        # Hyperparameter tuning
+        start_time = time.time()
+
         if self.use_gridsearchcv:
             print("Starting GridSearchCV for tuning...")
             grid = GridSearchCV(
@@ -187,11 +189,14 @@ class GBDT_Model:
             )
             grid.fit(X, y)
             self.best_params[label] = grid.best_params_
-            print(f"Best params for {label}: {self.best_params[label]}")
             best_model = grid.best_estimator_
         else:
-            print("Fitting histogram GBDT with early stopping...")
+            print("Fitting histogram GBDT...")
             best_model = pipe.fit(X, y)
+
+        end_time = time.time()
+        duration = end_time - start_time
+        print(f"Training time for {label} model: {duration:.2f} seconds")
 
         # Cross-validation insights
         if self.use_kfold_insights:
@@ -493,14 +498,50 @@ class GBDT_Model:
                 plot_type="dot",
                 show=True
             )
+        
+    def infer_row(self, row_idx: int = 0, use_active_model: bool = True):
+        """
+        Perform single-row inference and print prediction time, true vs. predicted, and residual.
+        """
+        df = self.df_eval_active if use_active_model else self.df_eval_inactive
+        model_path = self.model_path_active if use_active_model else self.model_path_inactive
+        label = "Active" if use_active_model else "Inactive"
 
+        if not 0 <= row_idx < len(df):
+            raise IndexError(f"Row index {row_idx} out of bounds for {label} evaluation set with {len(df)} rows.")
+
+        row = df.iloc[row_idx]
+        y_true = row["REMAINING_PICKING_TIME"]
+        X_row = pd.DataFrame([row.drop("REMAINING_PICKING_TIME")])
+
+        # Drop inactive-only cols if needed
+        if not use_active_model:
+            X_row = X_row.drop(columns=["TIME_OF_DAY_MINS", "NR_OF_PICKERS", "NR_OF_PICKS"], errors="ignore")
+
+        pipe = joblib.load(model_path)
+        preproc = pipe.named_steps["preprocessor"]
+        model = pipe.named_steps["regressor"]
+
+        # Measure prediction time
+        t0 = time.perf_counter()
+        X_trans = preproc.transform(X_row)
+        y_pred = model.predict(X_trans)[0]
+        elapsed = time.perf_counter() - t0
+
+        print(
+            f"{label} model inference (row {row_idx}):"
+            f"\n  ▸ true remaining time  : {y_true:.2f} min"
+            f"\n  ▸ predicted time       : {y_pred:.2f} min"
+            f"\n  ▸ residual             : {y_pred - y_true:+.2f} min"
+            f"\n  ▸ inference time       : {elapsed:.4f} seconds"
+        )
 
 # Example usage
 if __name__ == '__main__':
     gbdt = GBDT_Model(
         big_csv_path='Data/Training/Features_all_dates.csv',
-        use_gridsearchcv=True,
-        use_kfold_insights=False,
+        use_gridsearchcv=False,
+        use_kfold_insights=True,
         param_grid={
             'regressor__max_iter': [100, 200, 300],
             'regressor__learning_rate': [0.05, 0.1, 0.3]
@@ -525,3 +566,5 @@ if __name__ == '__main__':
 
     # Generate SHAP explanations
     gbdt.explain_with_shap(n_samples=2000)
+
+    gbdt.infer_row(row_idx=1234, use_active_model=False)
