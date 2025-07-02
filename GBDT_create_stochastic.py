@@ -370,8 +370,8 @@ class GBDT_Model:
     def plot_active_vs_running_completion(self, n_bins: int = 20):
         """
         For the ACTIVE model, plot in a single figure:
-        (a) Mean CRPS vs. RUNNING_COMPLETION
-        (b) Mean predicted Std-Dev (min) vs. RUNNING_COMPLETION
+        (a) Mean CRPS ± 99% CI vs. RUNNING_COMPLETION
+        (b) Mean predicted Std-Dev ± 99% CI vs. RUNNING_COMPLETION
 
         Parameters
         ----------
@@ -386,44 +386,65 @@ class GBDT_Model:
             raise ValueError("Column 'PICKING_RUNNING_COMPLETION' not found.")
 
         # ── Predict LogNormal(μ, σ) distributions ─────────────────────────────
-        pipe   = joblib.load(self.model_path_active)
-        pre    = pipe.named_steps["preprocessor"]
-        ngb    = pipe.named_steps["regressor"]
+        pipe = joblib.load(self.model_path_active)
+        pre = pipe.named_steps["preprocessor"]
+        ngb = pipe.named_steps["regressor"]
 
-        X_raw  = df.drop(columns=["REMAINING_PICKING_TIME"], errors="ignore")
-        dist   = ngb.pred_dist(pre.transform(X_raw))
+        X_raw = df.drop(columns=["REMAINING_PICKING_TIME"], errors="ignore")
+        dist = ngb.pred_dist(pre.transform(X_raw))
 
-        μ, σ   = dist.loc, dist.scale
-        df["crps"]            = crps_lognormal_cf(df["REMAINING_PICKING_TIME"].values, μ, σ)
+        μ, σ = dist.loc, dist.scale
+        df["crps"] = crps_lognormal_cf(df["REMAINING_PICKING_TIME"].values, μ, σ)
         df["pred_std_minutes"] = np.sqrt((np.exp(σ**2) - 1) * np.exp(2*μ + σ**2))
 
         # ── Bin by RUNNING_COMPLETION ─────────────────────────────────────────
-        bins          = np.linspace(0.0, 1.0, n_bins + 1)
-        df["bin"]     = pd.cut(df["PICKING_RUNNING_COMPLETION"], bins=bins,
-                            include_lowest=True, right=False)
+        bins = np.linspace(0.0, 1.0, n_bins + 1)
+        df["bin"] = pd.cut(df["PICKING_RUNNING_COMPLETION"], bins=bins,
+                        include_lowest=True, right=False)
+        bin_centers = df["bin"].cat.categories.map(lambda iv: iv.mid)
 
-        crps_mean     = df.groupby("bin", observed=True)["crps"].mean()
-        std_mean      = df.groupby("bin", observed=True)["pred_std_minutes"].mean()
-        bin_centers   = crps_mean.index.map(lambda iv: iv.mid)
+        # ── Aggregate means and 99% CI ─────────────────────────────────────────
+        z_score = 2.576  # for 99% confidence interval
 
-        # ── Plot side-by-side ─────────────────────────────────────────────────
+        crps_stats = df.groupby("bin", observed=True)["crps"].agg(
+            mean="mean", sem="sem")
+        crps_stats["ci"] = z_score * crps_stats["sem"]
+
+        std_stats = df.groupby("bin", observed=True)["pred_std_minutes"].agg(
+            mean="mean", sem="sem")
+        std_stats["ci"] = z_score * std_stats["sem"]
+
+        # ── Plot with 99% CI ──────────────────────────────────────────────────
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharex=True)
 
-        axes[0].plot(bin_centers, crps_mean.values, color="C0", marker="o", linewidth=2)
-        axes[0].set_xlabel("Running Completion [%]")
+        # Plot CRPS
+        axes[0].plot(bin_centers, crps_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean CRPS")
+        axes[0].fill_between(bin_centers,
+                            crps_stats["mean"] - crps_stats["ci"],
+                            crps_stats["mean"] + crps_stats["ci"],
+                            color="C0", alpha=0.2, label="99% CI")
+        axes[0].set_xlabel("Running Completion")
         axes[0].set_ylabel("Mean CRPS [min]")
         axes[0].set_title("CRPS vs. RUNNING_COMPLETION")
         axes[0].grid(True)
+        axes[0].legend()
 
-        axes[1].plot(bin_centers, std_mean.values, color="C0", marker="o", linewidth=2)
-        axes[1].set_xlabel("Running Completion [%]")
+        # Plot Predicted Std-Dev
+        axes[1].plot(bin_centers, std_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean σ")
+        axes[1].fill_between(bin_centers,
+                            std_stats["mean"] - std_stats["ci"],
+                            std_stats["mean"] + std_stats["ci"],
+                            color="C0", alpha=0.2, label="99% CI")
+        axes[1].set_xlabel("Running Completion")
         axes[1].set_ylabel("Predicted Std-Dev [min]")
         axes[1].set_title("σ vs. RUNNING_COMPLETION")
         axes[1].grid(True)
+        axes[1].legend()
 
         fig.suptitle("Active NGBoost Model – Performance vs. Running Completion", y=1.03)
         fig.tight_layout()
         plt.show()
+
     
     # ToDo: maybe add feature importance on std results as well
 
@@ -497,8 +518,8 @@ if __name__ == "__main__":
     # Uncomment if you need to train
     #model.train_models()
 
-    #model.evaluate()
+    model.evaluate()
 
-    #model.plot_active_vs_running_completion()
+    model.plot_active_vs_running_completion()
 
     stochastic_gbdt_inference(row_idx=100, use_active_model=False)  # change index as needed

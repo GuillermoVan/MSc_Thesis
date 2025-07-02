@@ -411,7 +411,7 @@ class GBDT_Model:
     def plot_residuals(self):
         """
         Plot residuals vs. true remaining time for both active and inactive models
-        using the evaluation DataFrames.
+        in a single scatter plot with different colors.
         """
         # Active set
         df_act = self.df_eval_active.copy()
@@ -428,23 +428,17 @@ class GBDT_Model:
         y_pred_inact = joblib.load(self.model_path_inactive).predict(X_inact)
         residual_inact = y_pred_inact - y_inact
 
-        # create side-by-side scatter plots
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
-        axes[0].scatter(y_act, residual_act, alpha=0.3)
-        axes[0].axhline(0, linestyle='--', linewidth=1)
-        axes[0].set_xlabel('True Remaining Time')
-        axes[0].set_ylabel('Residual (pred - true)')
-        axes[0].set_title('Active Model Residuals')
-        axes[0].grid(True)
-
-        axes[1].scatter(y_inact, residual_inact, alpha=0.3)
-        axes[1].axhline(0, linestyle='--', linewidth=1)
-        axes[1].set_xlabel('True Remaining Time')
-        axes[1].set_title('Inactive Model Residuals')
-        axes[1].grid(True)
-
-        fig.suptitle('Residuals vs. True Remaining Time')
-        fig.tight_layout()
+        # Single combined scatter plot
+        plt.figure(figsize=(8, 6))
+        plt.scatter(y_act, residual_act, alpha=0.3, label='Active Model', color='blue')
+        plt.scatter(y_inact, residual_inact, alpha=0.3, label='Inactive Model', color='orange')
+        plt.axhline(0, linestyle='--', linewidth=1, color='gray')
+        plt.xlabel('True Remaining Time')
+        plt.ylabel('Residual (pred - true)')
+        plt.title('Residuals vs. True Remaining Time')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
         plt.show()
 
     def explain_with_shap(self, n_samples=2000):
