@@ -3,12 +3,13 @@ from gurobipy import Model, GRB, quicksum
 import numpy as np
 import os
 import plotly.express as px
-
+import matplotlib.pyplot as plt
 
 class Benchmarking:
     def __init__(
         self,
         gbdt_data_path: str | None,
+        reliability_gbdt_data_path: str | None,
         normal_data_path: str | None,
         start_time: str,
         end_time: str,
@@ -35,6 +36,11 @@ class Benchmarking:
             self.gbdt_schedule_df = self.csv_to_df(gbdt_data_path)
         else:
             self.gbdt_schedule_df = None
+        
+        if reliability_gbdt_data_path is not None:
+            self.reliability_gbdt_df = pd.read_csv(reliability_gbdt_data_path, sep=";")
+        else:
+            self.reliability_gbdt_df = None
 
         if normal_data_path is not None:
             self.normal_schedule_df = self.csv_to_df(normal_data_path)
@@ -245,10 +251,65 @@ class Benchmarking:
 
         return avg_makespan, total_delay, delayed_fs_count
 
+    def visualize_reliability(self, reliability_df: pd.DataFrame):
+        """
+        Visualizes residuals (predicted - actual start times) over the percentage of time 
+        until actual start for each frame-stack.
+        
+        Parameters
+        ----------
+        reliability_df : pd.DataFrame
+            DataFrame with actual start timestamps and multiple prediction columns (timestamped).
+        """
+        df = reliability_df.copy()
+
+        # Ensure proper datetime parsing
+        df['ACTUAL_START_TS_SIM'] = pd.to_datetime(df['ACTUAL_START_TS_SIM'], errors='coerce')
+        
+        # Identify prediction timestamp columns
+        timestamp_cols = [col for col in df.columns if col not in ['PLANNED_FRAME_STACK_ID', 'ACTUAL_START_TS_SIM']]
+        
+        # Reshape to long format
+        df_long = df.melt(
+            id_vars=['PLANNED_FRAME_STACK_ID', 'ACTUAL_START_TS_SIM'],
+            value_vars=timestamp_cols,
+            var_name='measurement_time',
+            value_name='predicted_start'
+        )
+        
+        # Drop rows with missing values
+        df_long.dropna(subset=['predicted_start', 'ACTUAL_START_TS_SIM'], inplace=True)
+        
+        # Convert columns to datetime
+        df_long['measurement_time'] = pd.to_datetime(df_long['measurement_time'])
+        df_long['predicted_start'] = pd.to_datetime(df_long['predicted_start'])
+
+        # Compute percentage of time elapsed until actual start
+        df_long['perc_to_actual_start'] = (
+            (df_long['measurement_time'] - df_long['measurement_time'].min())
+            / (df_long['ACTUAL_START_TS_SIM'] - df_long['measurement_time'].min())
+        ).clip(upper=1).astype(float)
+
+        # Compute residual in minutes
+        df_long['residual_min'] = (
+            (df_long['predicted_start'] - df_long['ACTUAL_START_TS_SIM']).dt.total_seconds() / 60
+        )
+
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.scatter(df_long['perc_to_actual_start'] * 100, df_long['residual_min'], alpha=0.5, s=10)
+        plt.axhline(0, color='black', linestyle='--', linewidth=1)
+        plt.xlabel('Percentage of Time Until Actual Start (%)')
+        plt.ylabel('Residual (Predicted - Actual) Start Time (minutes)')
+        plt.title('Prediction Residuals vs. Time Until Actual Start')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
 
 if __name__ == '__main__':
     benchmark = Benchmarking(
                         gbdt_data_path = "Simulation_output\Simulation schedule output 24 jan.csv",
+                        reliability_gbdt_data_path = "Simulation_output\Reliability schedule 24 jan.csv",
                         normal_data_path = None,
                         start_time = "2025-01-24 04:30:00",
                         end_time = "2025-01-24 23:00:00",
@@ -298,3 +359,5 @@ if __name__ == '__main__':
     print(f'Total delay (GBDT hindsight) = {total_delay_gbdt_opt:.2f} min')
     print(f'Delayed frame-stacks (GBDT hindsight) = {delayed_fs_gbdt_opt}')
 
+    # Plot Delta(planned, actual) over percentage
+    benchmark.visualize_reliability(benchmark.reliability_gbdt_df)
