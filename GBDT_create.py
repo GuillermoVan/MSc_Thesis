@@ -18,6 +18,7 @@ from sklearn.metrics import (
 import shap
 import matplotlib.pyplot as plt
 import time
+import scipy.stats as stats
 
 
 def _mape_ignore_zero(y_true, y_pred):
@@ -325,10 +326,8 @@ class GBDT_Model:
     def plot_active_vs_running_completion(self, n_bins: int = 10):
         """
         Plot MAE, RMSE, MAPE, and residual variance vs. running completion
-        for the active model in a 2x2 grid, including 0 but excluding 1.0.
-        Uses the evaluation-active DataFrame.
+        for the active model in a 2x2 grid with 99% confidence intervals.
         """
-        # Prepare evaluation-active DataFrame
         df = self.df_eval_active.copy()
         df = df[df['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
 
@@ -339,72 +338,65 @@ class GBDT_Model:
             pred=y_pred,
             abs_error=np.abs(y_pred - y_true),
             sq_error=(y_pred - y_true) ** 2,
-            abs_perc_error=np.where(
-                y_true != 0,
-                np.abs((y_pred - y_true) / y_true) * 100,
-                np.nan
-            ),
+            abs_perc_error=np.where(y_true != 0, np.abs((y_pred - y_true) / y_true) * 100, np.nan),
             residual=y_pred - y_true
         )
         if 'PICKING_RUNNING_COMPLETION' not in df_plot:
             raise KeyError("Column 'PICKING_RUNNING_COMPLETION' is missing.")
 
-        # define uniform bins over [0,1), exclude 1.0
         bins = np.linspace(0.0, 1.0, n_bins + 1)
-        df_plot['bin'] = pd.cut(
-            df_plot['PICKING_RUNNING_COMPLETION'], bins=bins,
-            include_lowest=True, right=False
-        )
+        df_plot['bin'] = pd.cut(df_plot['PICKING_RUNNING_COMPLETION'], bins=bins, include_lowest=True, right=False)
         df_plot = df_plot[df_plot['bin'].notna()]
 
-        # aggregate metrics by bin
-        mae_stats = df_plot.groupby('bin')['abs_error'].mean()
-        rmse_stats = np.sqrt(df_plot.groupby('bin')['sq_error'].mean())
-        mape_stats = df_plot.groupby('bin')['abs_perc_error'].mean()
-        var_stats = df_plot.groupby('bin')['residual'].var(ddof=1)
+        agg_funcs = {
+            'abs_error': ['mean', 'sem'],
+            'sq_error': ['mean', 'sem'],
+            'abs_perc_error': ['mean', 'sem'],
+            'residual': ['var', 'count']  # for variance CI
+        }
+        grouped = df_plot.groupby('bin').agg(agg_funcs)
 
-        # compute midpoints and prep values, padding 0
-        centers = mae_stats.index.map(lambda iv: iv.mid)
-        x_vals = np.concatenate(([0.0], centers.values))
-        mae_vals = np.concatenate(([mae_stats.iloc[0]], mae_stats.values))
-        rmse_vals = np.concatenate(([rmse_stats.iloc[0]], rmse_stats.values))
-        mape_vals = np.concatenate(([mape_stats.iloc[0]], mape_stats.values))
-        var_vals = np.concatenate(([var_stats.iloc[0]], var_stats.values))
+        centers = grouped.index.map(lambda iv: iv.mid)
+        z = stats.norm.ppf(0.995)  # 99% CI → 2.576
 
-        # plot metrics in 2x2 grid
+        # MAE
+        mae_mean = grouped[('abs_error', 'mean')]
+        mae_ci = z * grouped[('abs_error', 'sem')]
+
+        # RMSE (sqrt of mean squared error)
+        rmse_mean = np.sqrt(grouped[('sq_error', 'mean')])
+        rmse_ci = z * grouped[('sq_error', 'sem')] / (2 * rmse_mean.replace(0, np.nan))
+
+        # MAPE
+        mape_mean = grouped[('abs_perc_error', 'mean')]
+        mape_ci = z * grouped[('abs_perc_error', 'sem')]
+
+        # Residual variance
+        var_mean = grouped[('residual', 'var')]
+        var_n = grouped[('residual', 'count')]
+        var_se = np.sqrt(2 / (var_n - 1)) * var_mean
+        var_ci = z * var_se
+
         fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
         axes_flat = axes.flatten()
 
-        # MAE subplot
-        axes_flat[0].plot(x_vals, mae_vals, 'o-')
-        axes_flat[0].set_ylabel('MAE [min]')
-        axes_flat[0].set_title('MAE vs. Running Completion')
-        axes_flat[0].grid(True)
+        def plot_with_ci(ax, x, y, ci, label, ylabel):
+            ax.plot(x, y, 'o-', label=f'Mean {label}')
+            ax.fill_between(x, y - ci, y + ci, alpha=0.2, label='99% CI')
+            ax.set_ylabel(ylabel)
+            ax.set_title(f'{label} vs. Running Completion')
+            ax.grid(True)
+            ax.legend(loc='best')  # Add legend
 
-        # RMSE subplot
-        axes_flat[1].plot(x_vals, rmse_vals, 'o-')
-        axes_flat[1].set_ylabel('RMSE [min]')
-        axes_flat[1].set_title('RMSE vs. Running Completion')
-        axes_flat[1].grid(True)
-
-        # MAPE subplot
-        axes_flat[2].plot(x_vals, mape_vals, 'o-')
+        plot_with_ci(axes_flat[0], centers, mae_mean, mae_ci, 'MAE', 'MAE [min]')
+        plot_with_ci(axes_flat[1], centers, rmse_mean, rmse_ci, 'RMSE', 'RMSE [min]')
         axes_flat[2].set_xlabel('Running Completion')
-        axes_flat[2].set_ylabel('MAPE [%]')
-        axes_flat[2].set_title('MAPE vs. Running Completion')
-        axes_flat[2].grid(True)
-
-        # Residual Variance subplot
-        axes_flat[3].plot(x_vals, var_vals, 'o-')
+        plot_with_ci(axes_flat[2], centers, mape_mean, mape_ci, 'MAPE', 'MAPE [%]')
         axes_flat[3].set_xlabel('Running Completion')
-        axes_flat[3].set_ylabel('Residual Variance [min²]')
-        axes_flat[3].set_title('Residual Variance vs. Running Completion')
-        axes_flat[3].grid(True)
+        plot_with_ci(axes_flat[3], centers, var_mean, var_ci, 'Residual Variance', 'Variance [min²]')
 
-        # x-axis limits
         axes_flat[3].set_xlim(0.0, centers.max())
-
-        fig.suptitle('Active Model Performance Metrics vs. Running Completion')
+        fig.suptitle('Active Model Performance Metrics vs. Running Completion\n(99% Confidence Intervals)', fontsize=14)
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
 

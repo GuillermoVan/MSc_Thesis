@@ -326,7 +326,6 @@ if __name__ == '__main__':
     gbdt_hindsight_optimal_schedule = benchmark.generate_hindsight_optimal_schedule(benchmark.gbdt_schedule_df)
     normal_hindsight_optimal_schedule = benchmark.generate_hindsight_optimal_schedule(benchmark.normal_schedule_df)
 
-
     # Assess optimality per method
     optimality_gbdt = benchmark.calculate_optimality(benchmark.gbdt_schedule_df)
     print(f'Objective of schedule with GBDT = {optimality_gbdt}')
