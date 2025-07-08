@@ -370,15 +370,17 @@ class GBDT_Model:
     def plot_active_vs_running_completion(self, n_bins: int = 20):
         """
         For the ACTIVE model, plot in a single figure:
-        (a) Mean CRPS ± 99% CI vs. RUNNING_COMPLETION
-        (b) Mean predicted Std-Dev ± 99% CI vs. RUNNING_COMPLETION
+        (a) Mean CRPS with shaded ±1 std (68%) and ±2 std (95%) intervals
+        (b) Mean predicted Std-Dev with shaded ±1 std (68%) and ±2 std (95%) intervals
+        Transparent dots are excluded.
 
         Parameters
         ----------
         n_bins : int, default=20
             Number of equal-width bins on PICKING_RUNNING_COMPLETION ∈ [0, 1).
         """
-        # ── Filter evaluation set ──────────────────────────────────────────────
+        import matplotlib.colors as mcolors
+
         df = self.df_eval_active.copy()
         df = df[df["REMAINING_PICKING_TIME"] <= self.remaining_time_cap]
 
@@ -399,51 +401,64 @@ class GBDT_Model:
 
         # ── Bin by RUNNING_COMPLETION ─────────────────────────────────────────
         bins = np.linspace(0.0, 1.0, n_bins + 1)
-        df["bin"] = pd.cut(df["PICKING_RUNNING_COMPLETION"], bins=bins,
-                        include_lowest=True, right=False)
+        df["bin"] = pd.cut(df["PICKING_RUNNING_COMPLETION"], bins=bins, include_lowest=True, right=False)
         bin_centers = df["bin"].cat.categories.map(lambda iv: iv.mid)
 
-        # ── Aggregate means and 99% CI ─────────────────────────────────────────
-        z_score = 2.576  # for 99% confidence interval
+        # ── Aggregate stats per bin ───────────────────────────────────────────
+        def agg_stats(series):
+            return pd.DataFrame({
+                "mean": series.groupby(df["bin"]).mean(),
+                "std": series.groupby(df["bin"]).std(),
+                "low": series.groupby(df["bin"]).apply(lambda x: np.percentile(x, 2.5)),
+                "high": series.groupby(df["bin"]).apply(lambda x: np.percentile(x, 97.5)),
+            })
 
-        crps_stats = df.groupby("bin", observed=True)["crps"].agg(
-            mean="mean", sem="sem")
-        crps_stats["ci"] = z_score * crps_stats["sem"]
+        crps_stats = agg_stats(df["crps"])
+        std_stats = agg_stats(df["pred_std_minutes"])
 
-        std_stats = df.groupby("bin", observed=True)["pred_std_minutes"].agg(
-            mean="mean", sem="sem")
-        std_stats["ci"] = z_score * std_stats["sem"]
+        # ── Plot ──────────────────────────────────────────────────────────────
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True)
 
-        # ── Plot with 99% CI ──────────────────────────────────────────────────
-        fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharex=True)
+        # Darker blue for ±1 std
+        base_color = mcolors.to_rgb("C0")
+        std_color = [c * 0.6 for c in base_color]  # slightly darker blue
+        ci_color = base_color
 
-        # Plot CRPS
+        # ── CRPS Plot ────────────────────────────────────────────────────────
         axes[0].plot(bin_centers, crps_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean CRPS")
         axes[0].fill_between(bin_centers,
-                            crps_stats["mean"] - crps_stats["ci"],
-                            crps_stats["mean"] + crps_stats["ci"],
-                            color="C0", alpha=0.2, label="99% CI")
+                            crps_stats["mean"] - crps_stats["std"],
+                            crps_stats["mean"] + crps_stats["std"],
+                            color=std_color, alpha=0.2, label="±1 Std Dev (68%)")
+        axes[0].fill_between(bin_centers,
+                            crps_stats["low"], crps_stats["high"],
+                            color=ci_color, alpha=0.35, label="±2 Std Dev (95%)")
         axes[0].set_xlabel("Running Completion")
-        axes[0].set_ylabel("Mean CRPS [min]")
-        axes[0].set_title("CRPS vs. RUNNING_COMPLETION")
+        axes[0].set_ylabel("CRPS [min]")
+        axes[0].set_title("CRPS vs. Running Completion")
         axes[0].grid(True)
         axes[0].legend()
 
-        # Plot Predicted Std-Dev
+        # ── Predicted Std-Dev Plot ──────────────────────────────────────────
         axes[1].plot(bin_centers, std_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean σ")
         axes[1].fill_between(bin_centers,
-                            std_stats["mean"] - std_stats["ci"],
-                            std_stats["mean"] + std_stats["ci"],
-                            color="C0", alpha=0.2, label="99% CI")
+                            std_stats["mean"] - std_stats["std"],
+                            std_stats["mean"] + std_stats["std"],
+                            color=std_color, alpha=0.2, label="±1 Std Dev (68%)")
+        axes[1].fill_between(bin_centers,
+                            std_stats["low"], std_stats["high"],
+                            color=ci_color, alpha=0.35, label="±2 Std Dev (95%)")
         axes[1].set_xlabel("Running Completion")
         axes[1].set_ylabel("Predicted Std-Dev [min]")
-        axes[1].set_title("σ vs. RUNNING_COMPLETION")
+        axes[1].set_title("σ vs. Running Completion")
         axes[1].grid(True)
         axes[1].legend()
 
-        fig.suptitle("Active NGBoost Model – Performance vs. Running Completion", y=1.03)
+        fig.suptitle("Active NGBoost Model – Performance vs. Running Completion", y=1.02)
         fig.tight_layout()
         plt.show()
+
+
 
     
     # ToDo: maybe add feature importance on std results as well

@@ -326,8 +326,16 @@ class GBDT_Model:
     def plot_active_vs_running_completion(self, n_bins: int = 10):
         """
         Plot MAE, RMSE, MAPE, and residual variance vs. running completion
-        for the active model in a 2x2 grid with 99% confidence intervals.
+        with both ±1 Std Dev (68%) and ±2 Std Dev (95%) intervals.
+
+        Confidence intervals are:
+        - ±1 Std Dev: standard deviation across bins
+        - ±2 Std Dev: 2.5th–97.5th empirical percentiles
         """
+        import matplotlib.colors as mcolors
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
+
         df = self.df_eval_active.copy()
         df = df[df['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
 
@@ -341,64 +349,84 @@ class GBDT_Model:
             abs_perc_error=np.where(y_true != 0, np.abs((y_pred - y_true) / y_true) * 100, np.nan),
             residual=y_pred - y_true
         )
+
         if 'PICKING_RUNNING_COMPLETION' not in df_plot:
             raise KeyError("Column 'PICKING_RUNNING_COMPLETION' is missing.")
 
         bins = np.linspace(0.0, 1.0, n_bins + 1)
         df_plot['bin'] = pd.cut(df_plot['PICKING_RUNNING_COMPLETION'], bins=bins, include_lowest=True, right=False)
-        df_plot = df_plot[df_plot['bin'].notna()]
+        bin_centers = df_plot['bin'].cat.categories.map(lambda iv: iv.mid)
 
-        agg_funcs = {
-            'abs_error': ['mean', 'sem'],
-            'sq_error': ['mean', 'sem'],
-            'abs_perc_error': ['mean', 'sem'],
-            'residual': ['var', 'count']  # for variance CI
-        }
-        grouped = df_plot.groupby('bin').agg(agg_funcs)
+        def bin_stats(series):
+            grouped = series.groupby(df_plot['bin'])
+            return pd.DataFrame({
+                'mean': grouped.mean(),
+                'std': grouped.std(),
+                'low': grouped.apply(lambda x: np.nanpercentile(x, 2.5)),
+                'high': grouped.apply(lambda x: np.nanpercentile(x, 97.5)),
+            })
 
-        centers = grouped.index.map(lambda iv: iv.mid)
-        z = stats.norm.ppf(0.995)  # 99% CI → 2.576
+        mae_stats  = bin_stats(df_plot['abs_error'])
+        rmse_stats = bin_stats(np.sqrt(df_plot['sq_error']))
+        mape_stats = bin_stats(df_plot['abs_perc_error'])
+        var_stats  = bin_stats(df_plot['residual'] ** 2)
 
-        # MAE
-        mae_mean = grouped[('abs_error', 'mean')]
-        mae_ci = z * grouped[('abs_error', 'sem')]
+        # Colors
+        base_color = mcolors.to_rgb("C0")
+        std_color = [c * 0.6 for c in base_color]  # darker blue for ±1 std
+        ci_color = base_color                    # lighter blue for ±2 std
 
-        # RMSE (sqrt of mean squared error)
-        rmse_mean = np.sqrt(grouped[('sq_error', 'mean')])
-        rmse_ci = z * grouped[('sq_error', 'sem')] / (2 * rmse_mean.replace(0, np.nan))
-
-        # MAPE
-        mape_mean = grouped[('abs_perc_error', 'mean')]
-        mape_ci = z * grouped[('abs_perc_error', 'sem')]
-
-        # Residual variance
-        var_mean = grouped[('residual', 'var')]
-        var_n = grouped[('residual', 'count')]
-        var_se = np.sqrt(2 / (var_n - 1)) * var_mean
-        var_ci = z * var_se
-
+        # Plotting
         fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
-        axes_flat = axes.flatten()
+        axes = axes.flatten()
 
-        def plot_with_ci(ax, x, y, ci, label, ylabel):
-            ax.plot(x, y, 'o-', label=f'Mean {label}')
-            ax.fill_between(x, y - ci, y + ci, alpha=0.2, label='99% CI')
+        def plot_with_bands(ax, stats, label, ylabel):
+            mean = stats['mean']
+            std = stats['std']
+            low = stats['low']
+            high = stats['high']
+
+            # Clip lower bounds to zero
+            lower_1std = np.maximum(mean - std, 0)
+            lower_95ci = np.maximum(low, 0)
+
+            # Plot
+            ax.plot(bin_centers, mean, marker='o', color='C0', linewidth=2)
+
+            ax.fill_between(bin_centers,
+                            lower_1std,
+                            mean + std,
+                            color=std_color, alpha=0.2)
+
+            ax.fill_between(bin_centers,
+                            lower_95ci,
+                            high,
+                            color=ci_color, alpha=0.35)
+
             ax.set_ylabel(ylabel)
             ax.set_title(f'{label} vs. Running Completion')
             ax.grid(True)
-            ax.legend(loc='best')  # Add legend
 
-        plot_with_ci(axes_flat[0], centers, mae_mean, mae_ci, 'MAE', 'MAE [min]')
-        plot_with_ci(axes_flat[1], centers, rmse_mean, rmse_ci, 'RMSE', 'RMSE [min]')
-        axes_flat[2].set_xlabel('Running Completion')
-        plot_with_ci(axes_flat[2], centers, mape_mean, mape_ci, 'MAPE', 'MAPE [%]')
-        axes_flat[3].set_xlabel('Running Completion')
-        plot_with_ci(axes_flat[3], centers, var_mean, var_ci, 'Residual Variance', 'Variance [min²]')
+            # Custom legend
+            legend_elements = [
+                Line2D([0], [0], color='C0', marker='o', linewidth=2, label=f'Mean {label}'),
+                Patch(facecolor=std_color, alpha=0.2, label='±1 Std Dev (68%)'),
+                Patch(facecolor=ci_color, alpha=0.35, label='±2 Std Dev (95%)'),
+            ]
+            ax.legend(handles=legend_elements)
 
-        axes_flat[3].set_xlim(0.0, centers.max())
-        fig.suptitle('Active Model Performance Metrics vs. Running Completion\n(99% Confidence Intervals)', fontsize=14)
+        plot_with_bands(axes[0], mae_stats, 'MAE', 'MAE [min]')
+        plot_with_bands(axes[1], rmse_stats, 'RMSE', 'RMSE [min]')
+        axes[2].set_xlabel('Running Completion')
+        plot_with_bands(axes[2], mape_stats, 'MAPE', 'MAPE [%]')
+        axes[3].set_xlabel('Running Completion')
+        plot_with_bands(axes[3], var_stats, 'Residual Variance', 'Variance [min²]')
+
+        axes[3].set_xlim(0.0, bin_centers.max())
+        fig.suptitle('Active GBDT Model – Performance vs. Running Completion\n(±1 Std Dev = 68%, ±2 Std Dev = 95%)', fontsize=14)
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
+
 
     def plot_residuals(self):
         """

@@ -4,6 +4,7 @@ import numpy as np
 import os
 import plotly.express as px
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 class Benchmarking:
     def __init__(
@@ -251,60 +252,87 @@ class Benchmarking:
 
         return avg_makespan, total_delay, delayed_fs_count
 
-    def visualize_reliability(self, reliability_df: pd.DataFrame):
+    def visualize_reliability(self, reliability_df: pd.DataFrame, n_bins: int = 30):
         """
-        Visualizes residuals (predicted - actual start times) over the percentage of time 
-        until actual start for each frame-stack.
-        
-        Parameters
-        ----------
-        reliability_df : pd.DataFrame
-            DataFrame with actual start timestamps and multiple prediction columns (timestamped).
+        Visualizes mean residuals (predicted - actual start time) over percentage
+        of time until actual start for each frame-stack. Shaded areas show:
+        - ±1 Std Dev (68%)
+        - ±2 Std Dev (95% empirical)
         """
-        df = reliability_df.copy()
+        import matplotlib.colors as mcolors
+        from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
 
-        # Ensure proper datetime parsing
+        df = reliability_df.copy()
         df['ACTUAL_START_TS_SIM'] = pd.to_datetime(df['ACTUAL_START_TS_SIM'], errors='coerce')
-        
-        # Identify prediction timestamp columns
         timestamp_cols = [col for col in df.columns if col not in ['PLANNED_FRAME_STACK_ID', 'ACTUAL_START_TS_SIM']]
-        
-        # Reshape to long format
+
         df_long = df.melt(
             id_vars=['PLANNED_FRAME_STACK_ID', 'ACTUAL_START_TS_SIM'],
             value_vars=timestamp_cols,
             var_name='measurement_time',
             value_name='predicted_start'
-        )
-        
-        # Drop rows with missing values
-        df_long.dropna(subset=['predicted_start', 'ACTUAL_START_TS_SIM'], inplace=True)
-        
-        # Convert columns to datetime
+        ).dropna()
+
         df_long['measurement_time'] = pd.to_datetime(df_long['measurement_time'])
         df_long['predicted_start'] = pd.to_datetime(df_long['predicted_start'])
 
-        # Compute percentage of time elapsed until actual start
         df_long['perc_to_actual_start'] = (
             (df_long['measurement_time'] - df_long['measurement_time'].min())
             / (df_long['ACTUAL_START_TS_SIM'] - df_long['measurement_time'].min())
         ).clip(upper=1).astype(float)
 
-        # Compute residual in minutes
         df_long['residual_min'] = (
             (df_long['predicted_start'] - df_long['ACTUAL_START_TS_SIM']).dt.total_seconds() / 60
         )
 
+        # Bin the percentage into equal-width bins
+        df_long['bin'] = pd.cut(df_long['perc_to_actual_start'], bins=n_bins, labels=False)
+
+        grouped = df_long.groupby('bin')
+        summary = pd.DataFrame({
+            'x_center': grouped['perc_to_actual_start'].mean(),
+            'y_mean': grouped['residual_min'].mean(),
+            'y_std': grouped['residual_min'].std(),
+            'y_low': grouped['residual_min'].apply(lambda x: np.percentile(x, 2.5)),
+            'y_high': grouped['residual_min'].apply(lambda x: np.percentile(x, 97.5)),
+        })
+
+        # Define blue and darker blue
+        base_color = mcolors.to_rgb("C0")
+        std_color = [c * 0.6 for c in base_color]
+        ci_color = base_color
+
+        # Clip lower bounds to zero
+        lower_1std = summary['y_mean'] - summary['y_std']
+        upper_1std = summary['y_mean'] + summary['y_std']
+        lower_95ci = summary['y_low']
+        upper_95ci = summary['y_high']
+
         # Plot
-        plt.figure(figsize=(10, 6))
-        plt.scatter(df_long['perc_to_actual_start'] * 100, df_long['residual_min'], alpha=0.5, s=10)
-        plt.axhline(0, color='black', linestyle='--', linewidth=1)
-        plt.xlabel('Percentage of Time Until Actual Start (%)')
-        plt.ylabel('Residual (Predicted - Actual) Start Time (minutes)')
-        plt.title('Prediction Residuals vs. Time Until Actual Start')
-        plt.grid(True)
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(summary['x_center'], summary['y_mean'], color='C0', marker='o', linewidth=2)
+
+        ax.fill_between(summary['x_center'], lower_1std, upper_1std, color=std_color, alpha=0.2)
+        ax.fill_between(summary['x_center'], lower_95ci, upper_95ci, color=ci_color, alpha=0.35)
+
+        ax.axhline(0, color='black', linestyle='--', linewidth=1)
+        ax.set_xlabel('Percentage of Time Until Actual Start')
+        ax.set_ylabel('Residual (Predicted - Actual) Start Time [min]')
+        ax.set_title('Prediction Residuals vs. Time Until Actual Start')
+        ax.grid(True)
+
+        # Custom legend
+        legend_elements = [
+            Line2D([0], [0], color='C0', marker='o', linewidth=2, label='Mean Residual'),
+            Patch(facecolor=std_color, alpha=0.2, label='±1 Std Dev (68%)'),
+            Patch(facecolor=ci_color, alpha=0.35, label='±2 Std Dev (95%)')
+        ]
+        ax.legend(handles=legend_elements)
+
         plt.tight_layout()
         plt.show()
+
 
 if __name__ == '__main__':
     benchmark = Benchmarking(
