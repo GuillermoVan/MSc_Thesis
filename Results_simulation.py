@@ -226,7 +226,7 @@ class Benchmarking:
     
     def calculate_additional_metrics(self, schedule_df):
         if schedule_df is None or schedule_df.empty:
-            return None, None, None
+            return None, None, None, None  # Added one more return
 
         df = schedule_df.copy()
 
@@ -242,15 +242,15 @@ class Benchmarking:
         )
         avg_makespan = makespan_per_shipment['makespan_min'].mean()
 
-        # Total delay (minutes)
+        # Delay metrics
         df['delay_min'] = (df['ACTUAL_END_TS_SIM'] - df['PLANNED_PICKING_DEADLINE_TS']).dt.total_seconds() / 60
-        df['delay_min'] = df['delay_min'].clip(lower=0)  # only count positive delays
+        df['delay_min'] = df['delay_min'].clip(lower=0)  # Only count positive delays
         total_delay = df['delay_min'].sum()
-
-        # Delayed frame-stack count
         delayed_fs_count = (df['delay_min'] > 0).sum()
+        max_delay = df['delay_min'].max()  # <- New metric
 
-        return avg_makespan, total_delay, delayed_fs_count
+        return avg_makespan, total_delay, delayed_fs_count, max_delay
+
 
     def visualize_reliability(self, reliability_df: pd.DataFrame, n_bins: int = 30):
         """
@@ -317,7 +317,7 @@ class Benchmarking:
         ax.fill_between(summary['x_center'], lower_95ci, upper_95ci, color=ci_color, alpha=0.35)
 
         ax.axhline(0, color='black', linestyle='--', linewidth=1)
-        ax.set_xlabel('Percentage of Time Until Actual Start')
+        ax.set_xlabel('Percentage of Time Until Actual Start Passed')
         ax.set_ylabel('Residual (Predicted - Actual) Start Time [min]')
         ax.set_title('Prediction Residuals vs. Time Until Actual Start')
         ax.grid(True)
@@ -329,6 +329,10 @@ class Benchmarking:
             Patch(facecolor=ci_color, alpha=0.35, label='±2 Std Dev (95%)')
         ]
         ax.legend(handles=legend_elements)
+
+        # Limit visible plot range
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(-150, 50)
 
         plt.tight_layout()
         plt.show()
@@ -375,16 +379,19 @@ if __name__ == '__main__':
     benchmark.visualize_schedule(normal_hindsight_optimal_schedule, title="Result with hindsight optimum based on normal operations")
 
     # Additional metrics for GBDT model integrated
-    avg_makespan_gbdt, total_delay_gbdt, delayed_fs_gbdt = benchmark.calculate_additional_metrics(benchmark.gbdt_schedule_df)
+    avg_makespan_gbdt, total_delay_gbdt, delayed_fs_gbdt, max_delay_gbdt = benchmark.calculate_additional_metrics(benchmark.gbdt_schedule_df)
     print(f'Average makespan per shipment (GBDT) = {avg_makespan_gbdt:.2f} min')
     print(f'Total delay (GBDT) = {total_delay_gbdt:.2f} min')
     print(f'Delayed frame-stacks (GBDT) = {delayed_fs_gbdt}')
+    print(f'Maximum delay (GBDT) = {max_delay_gbdt:.2f} min')
 
     # Additional metrics for hindsight optimum based on GBDT
-    avg_makespan_gbdt_opt, total_delay_gbdt_opt, delayed_fs_gbdt_opt = benchmark.calculate_additional_metrics(gbdt_hindsight_optimal_schedule)
+    avg_makespan_gbdt_opt, total_delay_gbdt_opt, delayed_fs_gbdt_opt, max_delay_gbdt_opt = benchmark.calculate_additional_metrics(gbdt_hindsight_optimal_schedule)
     print(f'Average makespan per shipment (GBDT hindsight) = {avg_makespan_gbdt_opt:.2f} min')
     print(f'Total delay (GBDT hindsight) = {total_delay_gbdt_opt:.2f} min')
     print(f'Delayed frame-stacks (GBDT hindsight) = {delayed_fs_gbdt_opt}')
+    print(f'Maximum delay (GBDT hindsight) = {max_delay_gbdt_opt:.2f} min')
+
 
     # Plot Delta(planned, actual) over percentage
     benchmark.visualize_reliability(benchmark.reliability_gbdt_df)

@@ -19,6 +19,10 @@ import shap
 import matplotlib.pyplot as plt
 import time
 import scipy.stats as stats
+from scipy.stats import permutation_test
+import matplotlib.colors as mcolors
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 
 def _mape_ignore_zero(y_true, y_pred):
@@ -262,23 +266,37 @@ class GBDT_Model:
             for label, params in self.best_params.items():
                 print(f"  {label}: {params}")
 
-    def _evaluate_loaded_model(self, df: pd.DataFrame, model_path: str, label: str):
+    def _evaluate_loaded_model(self, df: pd.DataFrame, model_path: str, label: str, return_errors=False):
         X, y_true = self._get_feature_targets(df, [])
         model = joblib.load(model_path)
         y_pred = model.predict(X)
 
-        rmse, mae, mape = self._evaluate_metrics(y_true, y_pred)
-
-        # compute residuals and their variance/std
         residuals = y_true - y_pred
-        resid_variance = np.var(residuals, ddof=1)   # sample variance
-        resid_std      = np.std(residuals, ddof=1)   # sample standard deviation
+        abs_errors = np.abs(residuals)
+        if return_errors:
+            return abs_errors
+        sq_errors = residuals ** 2
 
-        print(f"{label:8s} RMSE: {rmse:.2f}")
-        print(f"{label:8s} MAE : {mae:.2f}")
-        print(f"{label:8s} MAPE: {mape:.2f}%")
-        print(f"{label:8s} Std Dev : {resid_std:.2f} min")
-        print(f"{label:8s} Variance: {resid_variance:.2f} min²")
+        # Metrics
+        mae = abs_errors.mean()
+        mae_std = abs_errors.std(ddof=1)
+
+        rmse = np.sqrt(sq_errors.mean())
+        rmse_std = np.sqrt(sq_errors.std(ddof=1))  # std of squared error → std of RMSE approx.
+
+        mape_mask = y_true != 0
+        mape_vals = np.abs((y_pred[mape_mask] - y_true[mape_mask]) / y_true[mape_mask]) * 100
+        mape = mape_vals.mean()
+        mape_std = mape_vals.std(ddof=1)
+
+        resid_variance = residuals.var(ddof=1)
+        resid_std = residuals.std(ddof=1)
+
+        print(f"{label:8s} RMSE : {rmse:.2f} ± {rmse_std:.2f}")
+        print(f"{label:8s} MAE  : {mae:.2f} ± {mae_std:.2f}")
+        print(f"{label:8s} MAPE : {mape:.2f}% ± {mape_std:.2f}%")
+        print(f"{label:8s} Residual Std Dev : {resid_std:.2f} min")
+        print(f"{label:8s} Residual Variance: {resid_variance:.2f} min²")
 
     def evaluate(self):
         """
@@ -290,25 +308,41 @@ class GBDT_Model:
         """
         print("\n--- Evaluating Mean Baseline (only on inactive) ---")
         df_mb = self.df_eval_inactive.copy()
-        # Apply remaining_time_cap filter
         df_mb = df_mb[df_mb['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
         _, y = self._get_feature_targets(df_mb, [])
-        # Compute mean baseline from inactive training data
-        mean_val = self.df_train_inactive[self.df_train_inactive['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]['REMAINING_PICKING_TIME'].mean()
+
+        mean_val = self.df_train_inactive[
+            self.df_train_inactive['REMAINING_PICKING_TIME'] <= self.remaining_time_cap
+        ]['REMAINING_PICKING_TIME'].mean()
+
         y_pred_mb = np.full_like(y, fill_value=mean_val)
 
-        # compute primary metrics
-        rmse_mb, mae_mb, mape_mb = self._evaluate_metrics(y, y_pred_mb)
+        # Errors
+        residuals = y - y_pred_mb
+        abs_errors = np.abs(residuals)
+        sq_errors = residuals ** 2
+        mape_mask = y != 0
+        mape_vals = np.abs((y[mape_mask] - mean_val) / y[mape_mask]) * 100
 
-        # compute residuals, variance, std
-        residuals_mb = y - y_pred_mb
-        resid_var_mb = np.var(residuals_mb, ddof=1)   # sample variance
-        resid_std_mb = np.std(residuals_mb, ddof=1)   # sample std deviation
+        # Metrics
+        rmse_mean = np.sqrt(sq_errors.mean())
+        rmse_std  = np.sqrt(sq_errors.std(ddof=1))
 
-        print(f"Mean    RMSE      : {rmse_mb:.2f}")
-        print(f"Mean    MAE       : {mae_mb:.2f}")
-        print(f"Mean    MAPE      : {mape_mb:.2f}%")
-        print(f"Mean Resid Std Dev: {resid_std_mb:.2f} (min)    Variance: {resid_var_mb:.2f} (min²)")
+        mae_mean  = abs_errors.mean()
+        mae_std   = abs_errors.std(ddof=1)
+
+        mape_mean = mape_vals.mean()
+        mape_std  = mape_vals.std(ddof=1)
+
+        resid_var = residuals.var(ddof=1)
+        resid_std = residuals.std(ddof=1)
+
+        # Report
+        print(f"Mean    RMSE      : {rmse_mean:.2f} ± {rmse_std:.2f}")
+        print(f"Mean    MAE       : {mae_mean:.2f} ± {mae_std:.2f}")
+        print(f"Mean    MAPE      : {mape_mean:.2f}% ± {mape_std:.2f}%")
+        print(f"Mean    Residual Std Dev: {resid_std:.2f} min")
+        print(f"Mean    Residual Variance: {resid_var:.2f} min²")
 
         print("\n--- Evaluating Inactive GBDT Model ---")
         df_inactive_eval = self.df_eval_inactive.copy()
@@ -317,24 +351,27 @@ class GBDT_Model:
         df_inactive_eval = df_inactive_eval.drop(columns=['TIME_OF_DAY_MINS'], errors='ignore')
         self._evaluate_loaded_model(df_inactive_eval, self.model_path_inactive, "Inactive")
 
-        print("\n--- Evaluating Active GBDT Model ---")
+        # ToDo: evaluate p-value for delta between baseline inactive and inactive MAE
+
+
+        print("\n--- Evaluating Active GBDT Model (on START-only from active dataset) ---")
         df_active_eval = self.df_eval_active.copy()
-        df_active_eval = df_active_eval[df_active_eval['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
-        # Drop no columns for active (handled inside _get_feature_targets)
+        df_active_eval = df_active_eval[
+            (df_active_eval['PLANNED_TOTE_ID'] == 'START') &
+            (df_active_eval['REMAINING_PICKING_TIME'] <= self.remaining_time_cap)
+        ]
         self._evaluate_loaded_model(df_active_eval, self.model_path_active, "Active")
+
+        # ToDo: evaluate p-value for delta between baseline active and inactive MAE
+
 
     def plot_active_vs_running_completion(self, n_bins: int = 10):
         """
         Plot MAE, RMSE, MAPE, and residual variance vs. running completion
         with both ±1 Std Dev (68%) and ±2 Std Dev (95%) intervals.
 
-        Confidence intervals are:
-        - ±1 Std Dev: standard deviation across bins
-        - ±2 Std Dev: 2.5th–97.5th empirical percentiles
+        The first bin includes 0.0 and extends up to the first non-zero interval edge.
         """
-        import matplotlib.colors as mcolors
-        from matplotlib.patches import Patch
-        from matplotlib.lines import Line2D
 
         df = self.df_eval_active.copy()
         df = df[df['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
@@ -353,9 +390,13 @@ class GBDT_Model:
         if 'PICKING_RUNNING_COMPLETION' not in df_plot:
             raise KeyError("Column 'PICKING_RUNNING_COMPLETION' is missing.")
 
+        # Binning: include 0.0 in first bin
         bins = np.linspace(0.0, 1.0, n_bins + 1)
         df_plot['bin'] = pd.cut(df_plot['PICKING_RUNNING_COMPLETION'], bins=bins, include_lowest=True, right=False)
-        bin_centers = df_plot['bin'].cat.categories.map(lambda iv: iv.mid)
+
+        # Use sorted bin centers
+        bin_intervals = df_plot['bin'].cat.categories
+        bin_edges = [iv.left for iv in bin_intervals]
 
         def bin_stats(series):
             grouped = series.groupby(df_plot['bin'])
@@ -364,19 +405,31 @@ class GBDT_Model:
                 'std': grouped.std(),
                 'low': grouped.apply(lambda x: np.nanpercentile(x, 2.5)),
                 'high': grouped.apply(lambda x: np.nanpercentile(x, 97.5)),
-            })
+            }).reindex(bin_intervals)
+        
+        def rmse_bin_stats():
+            grouped = df_plot.groupby('bin')['sq_error']
+            mean_sq = grouped.mean()
+            std_sq  = grouped.std()
+            low     = grouped.apply(lambda x: np.nanpercentile(x, 2.5))
+            high    = grouped.apply(lambda x: np.nanpercentile(x, 97.5))
+            return pd.DataFrame({
+                'mean': np.sqrt(mean_sq),
+                'std' : std_sq / (2 * np.sqrt(mean_sq)),  # approx std of RMSE via delta method
+                'low' : np.sqrt(low),
+                'high': np.sqrt(high),
+            }).reindex(bin_intervals)
 
         mae_stats  = bin_stats(df_plot['abs_error'])
-        rmse_stats = bin_stats(np.sqrt(df_plot['sq_error']))
-        mape_stats = bin_stats(df_plot['abs_perc_error'])
+        rmse_stats = rmse_bin_stats()
+        mape_stats = bin_stats(df_plot['abs_perc_error'])  # avoid explosion
         var_stats  = bin_stats(df_plot['residual'] ** 2)
 
         # Colors
         base_color = mcolors.to_rgb("C0")
-        std_color = [c * 0.6 for c in base_color]  # darker blue for ±1 std
-        ci_color = base_color                    # lighter blue for ±2 std
+        std_color = [c * 0.6 for c in base_color]
+        ci_color = base_color
 
-        # Plotting
         fig, axes = plt.subplots(2, 2, figsize=(12, 10), sharex=True)
         axes = axes.flatten()
 
@@ -386,28 +439,17 @@ class GBDT_Model:
             low = stats['low']
             high = stats['high']
 
-            # Clip lower bounds to zero
             lower_1std = np.maximum(mean - std, 0)
             lower_95ci = np.maximum(low, 0)
 
-            # Plot
-            ax.plot(bin_centers, mean, marker='o', color='C0', linewidth=2)
-
-            ax.fill_between(bin_centers,
-                            lower_1std,
-                            mean + std,
-                            color=std_color, alpha=0.2)
-
-            ax.fill_between(bin_centers,
-                            lower_95ci,
-                            high,
-                            color=ci_color, alpha=0.35)
+            ax.plot(bin_edges, mean, marker='o', color='C0', linewidth=2)
+            ax.fill_between(bin_edges, lower_1std, mean + std, color=std_color, alpha=0.2)
+            ax.fill_between(bin_edges, lower_95ci, high, color=ci_color, alpha=0.35)
 
             ax.set_ylabel(ylabel)
             ax.set_title(f'{label} vs. Running Completion')
             ax.grid(True)
 
-            # Custom legend
             legend_elements = [
                 Line2D([0], [0], color='C0', marker='o', linewidth=2, label=f'Mean {label}'),
                 Patch(facecolor=std_color, alpha=0.2, label='±1 Std Dev (68%)'),
@@ -422,10 +464,13 @@ class GBDT_Model:
         axes[3].set_xlabel('Running Completion')
         plot_with_bands(axes[3], var_stats, 'Residual Variance', 'Variance [min²]')
 
-        axes[3].set_xlim(0.0, bin_centers.max())
+        for ax in axes:
+            ax.set_xlim(left=min(bin_edges) - 0.01, right=max(bin_edges))
+
         fig.suptitle('Active GBDT Model – Performance vs. Running Completion\n(±1 Std Dev = 68%, ±2 Std Dev = 95%)', fontsize=14)
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
+
 
 
     def plot_residuals(self):

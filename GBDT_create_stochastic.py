@@ -297,8 +297,15 @@ class GBDT_Model:
             "PLANNED_FRAME_STACK_ID", "PLANNED_TOTE_ID", "START_PICKING_TS",
             "END_PICKING_TS", "TRUCK_TRIP_ID", "PICK_DATE"
         ]
+
+        df_active_eval = self.df_eval_active.copy()
+        df_active_eval = df_active_eval[
+            (df_active_eval['PLANNED_TOTE_ID'] == 'START') &
+            (df_active_eval['REMAINING_PICKING_TIME'] <= self.remaining_time_cap)
+        ]
+
         self._evaluate_loaded_model(
-            self.df_eval_active [self.df_eval_active ["REMAINING_PICKING_TIME"] <= self.remaining_time_cap],
+            df_active_eval[df_active_eval["REMAINING_PICKING_TIME"] <= self.remaining_time_cap],
             base_drop.copy(), self.model_path_active, "Active"
         )
         self._evaluate_loaded_model(
@@ -367,6 +374,7 @@ class GBDT_Model:
             f"\n  Pred  Std Dev   : {dist_std:.2f} min    Variance: {(dist_std**2):.2f} min²"
         )
     
+
     def plot_active_vs_running_completion(self, n_bins: int = 20):
         """
         For the ACTIVE model, plot in a single figure:
@@ -377,7 +385,8 @@ class GBDT_Model:
         Parameters
         ----------
         n_bins : int, default=20
-            Number of equal-width bins on PICKING_RUNNING_COMPLETION ∈ [0, 1).
+            Number of equal-width bins on PICKING_RUNNING_COMPLETION ∈ [0, 1),
+            with the first bin capturing exactly 0.0.
         """
         import matplotlib.colors as mcolors
 
@@ -397,58 +406,76 @@ class GBDT_Model:
 
         μ, σ = dist.loc, dist.scale
         df["crps"] = crps_lognormal_cf(df["REMAINING_PICKING_TIME"].values, μ, σ)
-        df["pred_std_minutes"] = np.sqrt((np.exp(σ**2) - 1) * np.exp(2*μ + σ**2))
+        df["pred_std_minutes"] = np.sqrt((np.exp(σ**2) - 1) * np.exp(2 * μ + σ**2))
 
-        # ── Bin by RUNNING_COMPLETION ─────────────────────────────────────────
-        bins = np.linspace(0.0, 1.0, n_bins + 1)
-        df["bin"] = pd.cut(df["PICKING_RUNNING_COMPLETION"], bins=bins, include_lowest=True, right=False)
-        bin_centers = df["bin"].cat.categories.map(lambda iv: iv.mid)
+        # ── Custom binning with a separate bin for 0.0 ────────────────────────
+        eps = 1e-8
+        df_zero = df[df["PICKING_RUNNING_COMPLETION"] == 0.0].copy()
+        df_nonzero = df[df["PICKING_RUNNING_COMPLETION"] > 0.0].copy()
+
+        bins_nonzero = np.linspace(0.0, 1.0, n_bins + 1)[1:]  # exclude 0.0
+        bins_nonzero = np.insert(bins_nonzero, 0, 0.0 + eps)
+        df_zero["bin"] = pd.IntervalIndex.from_tuples([(0.0, 0.0)], closed="both")[0]
+        df_nonzero["bin"] = pd.cut(df_nonzero["PICKING_RUNNING_COMPLETION"], bins=bins_nonzero, include_lowest=True)
+
+        df_plot = pd.concat([df_zero, df_nonzero], axis=0)
+        df_plot["bin"] = pd.Categorical(df_plot["bin"])
+        bin_left_edges = df_plot["bin"].cat.categories.map(lambda iv: iv.left)
+
+        # Compute bin width (assumes uniform bin width)
+        if len(bin_left_edges) >= 2:
+            bin_width = bin_left_edges[1] - bin_left_edges[0]
+        else:
+            bin_width = 1.0 / n_bins  # fallback
+
+        x_max = bin_left_edges[-1] + bin_width
 
         # ── Aggregate stats per bin ───────────────────────────────────────────
         def agg_stats(series):
             return pd.DataFrame({
-                "mean": series.groupby(df["bin"]).mean(),
-                "std": series.groupby(df["bin"]).std(),
-                "low": series.groupby(df["bin"]).apply(lambda x: np.percentile(x, 2.5)),
-                "high": series.groupby(df["bin"]).apply(lambda x: np.percentile(x, 97.5)),
+                "mean": series.groupby(df_plot["bin"]).mean(),
+                "std": series.groupby(df_plot["bin"]).std(),
+                "low": series.groupby(df_plot["bin"]).apply(lambda x: np.percentile(x, 2.5)),
+                "high": series.groupby(df_plot["bin"]).apply(lambda x: np.percentile(x, 97.5)),
             })
 
-        crps_stats = agg_stats(df["crps"])
-        std_stats = agg_stats(df["pred_std_minutes"])
+        crps_stats = agg_stats(df_plot["crps"])
+        std_stats = agg_stats(df_plot["pred_std_minutes"])
 
         # ── Plot ──────────────────────────────────────────────────────────────
         fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True)
 
-        # Darker blue for ±1 std
         base_color = mcolors.to_rgb("C0")
-        std_color = [c * 0.6 for c in base_color]  # slightly darker blue
+        std_color = [c * 0.6 for c in base_color]
         ci_color = base_color
 
-        # ── CRPS Plot ────────────────────────────────────────────────────────
-        axes[0].plot(bin_centers, crps_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean CRPS")
-        axes[0].fill_between(bin_centers,
+        # ── CRPS Plot ─────────────────────────────────────────────────────────
+        axes[0].plot(bin_left_edges, crps_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean CRPS")
+        axes[0].fill_between(bin_left_edges,
                             crps_stats["mean"] - crps_stats["std"],
                             crps_stats["mean"] + crps_stats["std"],
                             color=std_color, alpha=0.2, label="±1 Std Dev (68%)")
-        axes[0].fill_between(bin_centers,
+        axes[0].fill_between(bin_left_edges,
                             crps_stats["low"], crps_stats["high"],
                             color=ci_color, alpha=0.35, label="±2 Std Dev (95%)")
         axes[0].set_xlabel("Running Completion")
+        axes[0].set_xlim(left=0.0, right=x_max)
         axes[0].set_ylabel("CRPS [min]")
         axes[0].set_title("CRPS vs. Running Completion")
         axes[0].grid(True)
         axes[0].legend()
 
-        # ── Predicted Std-Dev Plot ──────────────────────────────────────────
-        axes[1].plot(bin_centers, std_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean σ")
-        axes[1].fill_between(bin_centers,
+        # ── Std Dev Plot ──────────────────────────────────────────────────────
+        axes[1].plot(bin_left_edges, std_stats["mean"], color="C0", marker="o", linewidth=2, label="Mean σ")
+        axes[1].fill_between(bin_left_edges,
                             std_stats["mean"] - std_stats["std"],
                             std_stats["mean"] + std_stats["std"],
                             color=std_color, alpha=0.2, label="±1 Std Dev (68%)")
-        axes[1].fill_between(bin_centers,
+        axes[1].fill_between(bin_left_edges,
                             std_stats["low"], std_stats["high"],
                             color=ci_color, alpha=0.35, label="±2 Std Dev (95%)")
         axes[1].set_xlabel("Running Completion")
+        axes[1].set_xlim(left=0.0, right=x_max)
         axes[1].set_ylabel("Predicted Std-Dev [min]")
         axes[1].set_title("σ vs. Running Completion")
         axes[1].grid(True)
@@ -457,9 +484,6 @@ class GBDT_Model:
         fig.suptitle("Active NGBoost Model – Performance vs. Running Completion", y=1.02)
         fig.tight_layout()
         plt.show()
-
-
-
     
     # ToDo: maybe add feature importance on std results as well
 
