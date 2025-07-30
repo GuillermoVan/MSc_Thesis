@@ -332,7 +332,7 @@ class Benchmarking:
 
         # Limit visible plot range
         ax.set_xlim(0.0, 1.0)
-        ax.set_ylim(-150, 50)
+        ax.set_ylim(-150, 70)
 
         plt.tight_layout()
         plt.show()

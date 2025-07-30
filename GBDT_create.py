@@ -18,8 +18,8 @@ from sklearn.metrics import (
 import shap
 import matplotlib.pyplot as plt
 import time
-import scipy.stats as stats
 from scipy.stats import permutation_test
+from scipy.stats import ttest_rel
 import matplotlib.colors as mcolors
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
@@ -350,9 +350,7 @@ class GBDT_Model:
         # Drop TIME_OF_DAY_MINS before feature extraction
         df_inactive_eval = df_inactive_eval.drop(columns=['TIME_OF_DAY_MINS'], errors='ignore')
         self._evaluate_loaded_model(df_inactive_eval, self.model_path_inactive, "Inactive")
-
-        # ToDo: evaluate p-value for delta between baseline inactive and inactive MAE
-
+        abs_errors_inactive = self._evaluate_loaded_model(df_inactive_eval, self.model_path_inactive, "Inactive", return_errors=True)
 
         print("\n--- Evaluating Active GBDT Model (on START-only from active dataset) ---")
         df_active_eval = self.df_eval_active.copy()
@@ -361,8 +359,69 @@ class GBDT_Model:
             (df_active_eval['REMAINING_PICKING_TIME'] <= self.remaining_time_cap)
         ]
         self._evaluate_loaded_model(df_active_eval, self.model_path_active, "Active")
+        abs_errors_active = self._evaluate_loaded_model(df_active_eval, self.model_path_active, "Active", return_errors=True)
 
-        # ToDo: evaluate p-value for delta between baseline active and inactive MAE
+
+        # --- Statistical significance testing vs. baseline ---
+
+        # Compute mape_vals_inactive
+        df_inactive_eval_full = self.df_eval_inactive.copy()
+        df_inactive_eval_full = df_inactive_eval_full[df_inactive_eval_full['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
+        df_inactive_eval_full = df_inactive_eval_full.drop(columns=['TIME_OF_DAY_MINS'], errors='ignore')
+        _, y_inact = self._get_feature_targets(df_inactive_eval_full, [])
+        y_pred_inact = joblib.load(self.model_path_inactive).predict(_)
+        mape_mask_inact = y_inact != 0
+        mape_vals_inactive = np.abs((y_pred_inact[mape_mask_inact] - y_inact[mape_mask_inact]) / y_inact[mape_mask_inact]) * 100
+        rmse_vals_inactive = np.sqrt((y_inact - y_pred_inact) ** 2)
+
+        # Compute mape_vals_active
+        df_active_eval_full = self.df_eval_active.copy()
+        df_active_eval_full = df_active_eval_full[
+            (df_active_eval_full['PLANNED_TOTE_ID'] == 'START') &
+            (df_active_eval_full['REMAINING_PICKING_TIME'] <= self.remaining_time_cap)
+        ]
+        _, y_act = self._get_feature_targets(df_active_eval_full, [])
+        y_pred_act = joblib.load(self.model_path_active).predict(_)
+        mape_mask_act = y_act != 0
+        mape_vals_active = np.abs((y_pred_act[mape_mask_act] - y_act[mape_mask_act]) / y_act[mape_mask_act]) * 100
+        rmse_vals_active = np.sqrt((y_act - y_pred_act) ** 2)
+
+        print("\n--- Δ and p-values compared to Mean Baseline ---")
+
+        def paired_t_test(a, b, alternative='greater'):
+            # Compute differences
+            diffs = np.array(a) - np.array(b)
+            t_stat, p = ttest_rel(a, b, alternative=alternative)
+            return p
+
+        def report_delta_and_p(label, base_vals, model_vals, metric_name, is_rmse=False):
+            base_mean = np.mean(base_vals)
+            model_mean = np.mean(model_vals)
+            delta = base_mean - model_mean
+            p_val = paired_t_test(base_vals, model_vals)
+            
+            if is_rmse:
+                base_mean = np.sqrt(base_mean)
+                model_mean = np.sqrt(model_mean)
+                delta = base_mean - model_mean  # now in RMSE units
+            print(f"{label:8s} Δ {metric_name:7s} : {delta:>7.3f}   (p = {p_val:.2e})")
+
+        # Errors: Mean Baseline
+        residuals_mb = y - y_pred_mb
+        abs_errors_mb = np.abs(residuals_mb)
+        sq_errors_mb = residuals_mb ** 2
+        mape_vals_mb = np.abs((y[mape_mask] - mean_val) / y[mape_mask]) * 100
+
+        # Inactive
+        report_delta_and_p("Inactive", abs_errors_mb, abs_errors_inactive, "MAE")
+        report_delta_and_p("Inactive", mape_vals_mb, mape_vals_inactive, "MAPE")
+        report_delta_and_p("Inactive", sq_errors_mb, (y_inact - y_pred_inact) ** 2, "RMSE", is_rmse=True)
+
+        # Active
+        report_delta_and_p("Active", abs_errors_mb, abs_errors_active, "MAE")
+        report_delta_and_p("Active", mape_vals_mb, mape_vals_active, "MAPE")
+        report_delta_and_p("Active", sq_errors_mb, (y_act - y_pred_act) ** 2, "RMSE", is_rmse=True)
+
 
 
     def plot_active_vs_running_completion(self, n_bins: int = 10):
@@ -506,11 +565,11 @@ class GBDT_Model:
         plt.tight_layout()
         plt.show()
 
-    def explain_with_shap(self, n_samples=2000):
+    def explain_with_shap(self, n_samples=2000, return_tables=False):
         """
         Compute and plot SHAP summary explanations for both Active and Inactive models.
-        Each plot is shown in its own figure.
-        Uses the training DataFrames.
+        Additionally, compute numerical SHAP summary tables with mean(|SHAP value|) per feature.
+        Returns tables if return_tables=True.
         """
         def _get_transformed_feature_names(preprocessor):
             numeric_features = preprocessor.named_transformers_['num'].feature_names_in_
@@ -523,6 +582,8 @@ class GBDT_Model:
                 cat_feature_names = cat_transformer.get_feature_names()  # fallback for older sklearn
 
             return list(numeric_features) + list(cat_feature_names)
+
+        shap_tables = {}
 
         for label, df in [
             ('Active', self.df_train_active),
@@ -549,7 +610,7 @@ class GBDT_Model:
             explainer = shap.Explainer(model)
             shap_values = explainer(X_trans)
 
-            # Plot
+            # Plot summary
             shap.summary_plot(
                 shap_values.values,
                 features=X_trans,
@@ -557,6 +618,26 @@ class GBDT_Model:
                 plot_type="dot",
                 show=True
             )
+
+            # Numerical SHAP summary table
+            mean_abs_shap = np.abs(shap_values.values).mean(axis=0)
+            std_abs_shap = np.abs(shap_values.values).std(axis=0)
+
+            shap_df = pd.DataFrame({
+                'Feature': feature_names,
+                'Mean(|SHAP value|)': mean_abs_shap,
+                'Std(|SHAP value|)': std_abs_shap
+            }).sort_values(by='Mean(|SHAP value|)', ascending=False).reset_index(drop=True)
+
+            shap_tables[label] = shap_df
+
+            # Print top 10
+            print(f"\nSHAP feature summary for {label} model (all features):")
+            print(shap_df.to_string(index=False))
+
+        if return_tables:
+            return shap_tables
+
         
     def infer_row(self, row_idx: int = 0, use_active_model: bool = True):
         """

@@ -24,6 +24,7 @@ import shap
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 import time
+from scipy.stats import ttest_rel
 
 # ───────────────────────────── helper functions ──────────────────────────────
 def _mape_ignore_zero(y_true, y_pred):
@@ -373,7 +374,69 @@ class GBDT_Model:
             f"\n  Residual Std Dev: {resid_std_bl:.2f} min    Variance: {resid_var_bl:.2f} min²"
             f"\n  Pred  Std Dev   : {dist_std:.2f} min    Variance: {(dist_std**2):.2f} min²"
         )
-    
+
+        # ToDo: perform statistical significance test (Delta and p-value) to see if the expected (MAPE, MAE, RMSE, CRPS) of the baseline is actually worse than the model's expected (MAPE, MAE, RMSE, CRPS)
+        print("\n--- Statistical significance vs. LogNormal Inactive Baseline ---")
+
+        def paired_ttest_and_delta(metric_name, baseline_vals, model_vals, is_rmse=False):
+            # mean values for reporting
+            base_mean = np.mean(baseline_vals)
+            model_mean = np.mean(model_vals)
+
+            # If comparing RMSE, apply sqrt to MSE mean for both
+            if is_rmse:
+                base_val = np.sqrt(base_mean)
+                model_val = np.sqrt(model_mean)
+                delta = base_val - model_val
+            else:
+                delta = base_mean - model_mean
+
+            # paired t-test (one-sided: baseline > model)
+            t_stat, p_val = ttest_rel(baseline_vals, model_vals, alternative='greater')
+
+            print(f"Δ {metric_name:5s}: {delta:>7.3f}   (p = {p_val:.2e})")
+
+        # Gather per-row values from baseline evaluation above
+        y_true_eval = y_true
+        y_pred_baseline = y_pred
+        mu_bl = np.full_like(y_true_eval, mū_train)
+        sigma_bl = np.full_like(y_true_eval, σ̄_train)
+
+        # Errors from baseline (already computed):
+        abs_errors_baseline = np.abs(y_pred_baseline - y_true_eval)
+        sq_errors_baseline  = (y_pred_baseline - y_true_eval) ** 2
+        mape_vals_baseline  = np.abs((y_pred_baseline - y_true_eval) / y_true_eval) * 100
+        crps_vals_baseline  = crps_lognormal_cf(y_true_eval, mu_bl, sigma_bl)
+
+        # Errors from inactive model:
+        df_eval_inact = self.df_eval_inactive[self.df_eval_inactive["REMAINING_PICKING_TIME"] <= self.remaining_time_cap]
+        df_eval_inact = df_eval_inact[df_eval_inact["REMAINING_PICKING_TIME"] > 0]
+        drop_cols_inactive = [
+            "PLANNED_FRAME_STACK_ID", "PLANNED_TOTE_ID", "START_PICKING_TS",
+            "END_PICKING_TS", "TRUCK_TRIP_ID", "PICK_DATE",
+            "TIME_OF_DAY_MINS", "NR_OF_PICKERS", "NR_OF_PICKS"
+        ]
+        X_raw_inact, y_model = self._get_feature_targets(df_eval_inact, drop_cols_inactive)
+        pipe_inact = joblib.load(self.model_path_inactive)
+        pre_inact = pipe_inact.named_steps["preprocessor"]
+        reg_inact = pipe_inact.named_steps["regressor"]
+        dist_inact = reg_inact.pred_dist(pre_inact.transform(X_raw_inact))
+        y_pred_model = dist_inact.mean()
+
+        abs_errors_model = np.abs(y_pred_model - y_model)
+        sq_errors_model  = (y_pred_model - y_model) ** 2
+        mape_vals_model  = np.abs((y_pred_model - y_model) / y_model) * 100
+        crps_vals_model  = crps_lognormal_cf(y_model, dist_inact.loc, dist_inact.scale)
+
+        # Ensure lengths match for fair paired testing
+        assert len(abs_errors_baseline) == len(abs_errors_model), "Mismatched evaluation sizes."
+
+        # Report Δ and p-values
+        paired_ttest_and_delta("MAE",   abs_errors_baseline, abs_errors_model)
+        paired_ttest_and_delta("MAPE",  mape_vals_baseline,  mape_vals_model)
+        paired_ttest_and_delta("RMSE",  sq_errors_baseline,  sq_errors_model, is_rmse=True)
+        paired_ttest_and_delta("CRPS",  crps_vals_baseline,  crps_vals_model)
+
 
     def plot_active_vs_running_completion(self, n_bins: int = 20):
         """
