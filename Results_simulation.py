@@ -14,12 +14,12 @@ class Benchmarking:
         normal_data_path: str | None,
         start_time: str,
         end_time: str,
-        time_step_minutes: int = 3,
-        capacity: int = 70,
+        time_step_minutes: int = 6,
+        capacity: int = 45,
         edd_fs_prio_weight: float = 1.0,
-        min_start_gap_minutes: int = 3,
+        min_start_gap_minutes: int = 6,
         tempzone: str = 'Both',
-        nr_of_concurrent_starting_fs: int = 2,
+        nr_of_concurrent_starting_fs: int = 4,
         save_path: str = 'Results_benchmark'
         ):
 
@@ -336,7 +336,30 @@ class Benchmarking:
 
         plt.tight_layout()
         plt.show()
+    
 
+    def visualize_rescheduling_curve(self, rescheduling_path: str, title: str = "Rescheduling Time over Elapsed Minutes"):
+        """
+        Visualizes the rescheduling time curve using Matplotlib (line chart).
+        """
+        import matplotlib.pyplot as plt
+
+        df = pd.read_csv(rescheduling_path, sep=';', quotechar='"')
+        df['ELAPSED_MINUTES'] = pd.to_numeric(df['ELAPSED_MINUTES'], errors='coerce')
+        df['RESCHEDULING_TIME'] = pd.to_numeric(df['RESCHEDULING_TIME'], errors='coerce')
+        df = df.dropna()
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(df['ELAPSED_MINUTES'], df['RESCHEDULING_TIME'], marker='o', color='C0', linewidth=2)
+
+        plt.title(title)
+        plt.xlabel('Elapsed Minutes')
+        plt.ylabel('Rescheduling Time [min]')
+        plt.ylim(bottom=0)
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.show()
 
 if __name__ == '__main__':
     benchmark = Benchmarking(
@@ -395,3 +418,4 @@ if __name__ == '__main__':
 
     # Plot Delta(planned, actual) over percentage
     benchmark.visualize_reliability(benchmark.reliability_gbdt_df)
+    benchmark.visualize_rescheduling_curve(rescheduling_path="Simulation_output/Rescheduling_time.csv", title="Rescheduling Time over Elapsed Minutes")

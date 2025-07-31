@@ -6,56 +6,67 @@ def maximize_epsilon_integer_scaled():
     m = gp.Model("framestack_max_epsilon_integer_scaled")
     m.Params.OutputFlag = 0  # Disable solver output
 
-    # ── 1. Fixed alpha and slack ─────────────────────
-    alpha_val = 1.0
+    # ── 1. Fixed slack ─────────────────────
     eps_slack = 1e-6
 
     # ── 2. Decision variables ─────────────────────────
-    # Continuous positive variable to maximize
-    epsilon = m.addVar(lb=eps_slack, name="epsilon")
+    epsilon = m.addVar(lb=eps_slack, name="epsilon")  # To maximize
 
-    # Scaled variables: integers
+    # Scaled integer variables
+    alpha_scaled = m.addVar(vtype=GRB.INTEGER, name="alpha_scaled")
     beta_scaled  = m.addVar(vtype=GRB.INTEGER, name="beta_scaled")
     gamma_scaled = m.addVar(vtype=GRB.INTEGER, name="gamma_scaled")
     delta_scaled = m.addVar(vtype=GRB.INTEGER, name="delta_scaled")
     T_scaled     = m.addVar(vtype=GRB.INTEGER, name="T_scaled")
 
-    # Actual variables: linked to epsilon
+    # Actual real variables (linked to scaled vars via epsilon)
+    alpha = m.addVar(lb=0.0, name="alpha")
     beta  = m.addVar(lb=0.0, name="beta")
     gamma = m.addVar(lb=0.0, name="gamma")
     delta = m.addVar(lb=0.0, name="delta")
     T     = m.addVar(lb=0.0, name="T")
 
-    # Link scaled variables to actual variables via epsilon
+    # ── 3. Linking constraints ─────────────────────────
+    m.addConstr(alpha == alpha_scaled * epsilon, name="link_alpha")
     m.addConstr(beta  == beta_scaled  * epsilon, name="link_beta")
     m.addConstr(gamma == gamma_scaled * epsilon, name="link_gamma")
     m.addConstr(delta == delta_scaled * epsilon, name="link_delta")
     m.addConstr(T     == T_scaled     * epsilon, name="link_T")
 
-    # ── 3. Constraints ────────────────────────────────
-    m.addConstr(0.85 * alpha_val + beta >= T + eps_slack, name="c1")
-    m.addConstr(0.85 * alpha_val + 0.5 * beta + delta >= T + eps_slack, name="c2")
-    m.addConstr(0.1 * alpha_val + beta + gamma + delta + epsilon <= T, name="c3")
-    m.addConstr(1.0 * alpha_val + 0.5 * beta + gamma + epsilon <= T, name="c4")
-    m.addConstr(0.1 * alpha_val + beta + gamma + epsilon <= 0.85 * alpha_val, name="c5")
-    m.addConstr(gamma <= 0.1 * alpha_val + 0.25 * beta, name="c6")
-    m.addConstr(0.25 * beta + gamma + epsilon <= 0.1 * alpha_val + 0.5 * beta, name="c7")
+    # ── 4. Constraint parameters ──────────────────────
+    non_urgent_lower_bound = 0.8
+    urgent_ub = 0.3
 
-    # ── 4. Objective ─────────────────────────────────
+    at_entry = 0.0
+    at_exit = 0.25
+    non_linked = 0.5
+    at_other = 1.0
+
+    # ── 5. Constraints (all linear) ───────────────────
+    m.addConstr((non_urgent_lower_bound * alpha) + epsilon + at_other * beta >= T + eps_slack, name="c1")
+    m.addConstr((non_urgent_lower_bound * alpha) + epsilon + non_linked * beta + delta >= T + eps_slack, name="c2")
+    m.addConstr((urgent_ub * alpha + epsilon) + at_other * beta + gamma + delta <= T, name="c3")
+    m.addConstr(alpha + epsilon + non_linked * beta + gamma <= T, name="c4")
+    m.addConstr((urgent_ub * alpha + epsilon) + at_other * beta + gamma <= (non_urgent_lower_bound * alpha), name="c5")
+    m.addConstr(gamma <= (urgent_ub * alpha + epsilon) + at_exit * beta, name="c6")
+    m.addConstr(at_exit * beta + gamma + epsilon <= (urgent_ub * alpha) + non_linked * beta, name="c7")
+
+    # ── 6. Objective ─────────────────────────────────
     m.setObjective(epsilon, GRB.MAXIMIZE)
 
-    # ── 5. Solve ─────────────────────────────────────
+    # ── 7. Solve ─────────────────────────────────────
     m.optimize()
 
-    # ── 6. Report ────────────────────────────────────
+    # ── 8. Report ────────────────────────────────────
     if m.status == GRB.OPTIMAL:
         e = epsilon.X
         print(f"Optimal ε = {e:.8f} → scaling factor = {1/e:.6f}")
+
         print("\n--- Raw values ---")
-        print(f"α = {alpha_val:.6f}, β = {beta.X:.6f}, γ = {gamma.X:.6f}, δ = {delta.X:.6f}, ε = {e:.6f}, T = {T.X:.6f}")
+        print(f"α = {alpha.X:.6f}, β = {beta.X:.6f}, γ = {gamma.X:.6f}, δ = {delta.X:.6f}, ε = {e:.6f}, T = {T.X:.6f}")
 
         print("\n--- Integer-scaled values ---")
-        print(f"α_scaled = {alpha_val / e:.0f}")
+        print(f"α_scaled = {alpha_scaled.X:.0f}")
         print(f"β_scaled = {beta_scaled.X:.0f}, γ_scaled = {gamma_scaled.X:.0f}, δ_scaled = {delta_scaled.X:.0f}, ε_scaled = {e / e:.0f}, T_scaled = {T_scaled.X:.0f}")
     else:
         print("No optimal solution found.")
