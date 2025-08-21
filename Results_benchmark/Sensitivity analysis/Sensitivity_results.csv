@@ -1,0 +1,19 @@
+Scheduler_type;Parameter;Value;Objective_mean;Objective_STD;Makespan_mean;Makespan_STD;Total_delay_mean;Total_delay_STD;Delayed_count_mean;Delayed_count_STD;Max_delay_mean;Max_delay_STD
+Deterministic;Trigger period;3;-2,37473;0,791286088;200,774;4,160118054;1299,9;125,3940013;55,7;3,683295626;70,8;6,1427464
+Deterministic;Trigger period;6;-1,71379;0,815481325;195,111;3,176264228;1164;143,9459775;54,1;5,363456597;79,8;13,603921
+Deterministic;Trigger period;12;-1,97843;1,063116779;198,446;3,748380984;1212,3;162,4719121;53,3;4,854551129;71,5;11,42365966
+Scenario-based;Trigger period;3;-2,16792;0,767909884;198,792;5,87502208;1265,1;108,4439948;54,9;2,233582076;71,5;10,9772492
+Scenario-based;Trigger period;6;-2,57878;0,706309323;197,873;4,037518627;1306,1;121,8655452;56,7;2,540778533;68,3;13,53226597
+Scenario-based;Trigger period;12;-2,9724;1,107206276;205,499;6,045746806;1365,3;191,7463892;57,8;4,263540521;73,7;15,59237705
+Deterministic;EDD-FS priority weight;0,1;;;;;;;;;;
+Deterministic;EDD-FS priority weight;1;;;;;;;;;;
+Deterministic;EDD-FS priority weight;5;;;;;;;;;;
+Scenario-based;EDD-FS priority weight;0,1;;;;;;;;;;
+Scenario-based;EDD-FS priority weight;1;;;;;;;;;;
+Scenario-based;EDD-FS priority weight;5;;;;;;;;;;
+Deterministic;Scenario count;3;;;;;;;;;;
+Deterministic;Scenario count;20;;;;;;;;;;
+Deterministic;Scenario count;40;;;;;;;;;;
+Scenario-based;Scenario count;3;;;;;;;;;;
+Scenario-based;Scenario count;20;;;;;;;;;;
+Scenario-based;Scenario count;40;;;;;;;;;;

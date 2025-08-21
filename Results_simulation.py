@@ -5,6 +5,9 @@ import os
 import plotly.express as px
 import matplotlib.pyplot as plt
 import seaborn as sns
+import matplotlib.colors as mcolors
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 class Benchmarking:
     def __init__(
@@ -259,9 +262,6 @@ class Benchmarking:
         - ±1 Std Dev (68%)
         - ±2 Std Dev (95% empirical)
         """
-        import matplotlib.colors as mcolors
-        from matplotlib.patches import Patch
-        from matplotlib.lines import Line2D
 
         df = reliability_df.copy()
         df['ACTUAL_START_TS_SIM'] = pd.to_datetime(df['ACTUAL_START_TS_SIM'], errors='coerce')
@@ -336,30 +336,80 @@ class Benchmarking:
 
         plt.tight_layout()
         plt.show()
+
+        # ─── Added quantitative reliability stats ───
+        errors = df_long['residual_min'].dropna().to_numpy()
+        mean_err = float(np.mean(errors))
+        std_err = float(np.std(errors, ddof=1))
+        print(f"Average prediction error: {mean_err:.2f} min ± {std_err:.2f}")
     
 
-    def visualize_rescheduling_curve(self, rescheduling_path: str, title: str = "Rescheduling Time over Elapsed Minutes"):
+    def visualize_rescheduling_curve(self, folder_path: str, title: str = "Rescheduling Time vs. Simulation Progress"):
         """
-        Visualizes the rescheduling time curve using Matplotlib (line chart).
+        Plot mean rescheduling time over the fraction of simulation completed (0.1),
+        with ±1σ and ±2σ bands computed across multiple run files in `folder_path`.
         """
-        import matplotlib.pyplot as plt
+        if not os.path.isdir(folder_path):
+            raise FileNotFoundError(f"Folder not found: {folder_path}")
 
-        df = pd.read_csv(rescheduling_path, sep=';', quotechar='"')
-        df['ELAPSED_MINUTES'] = pd.to_numeric(df['ELAPSED_MINUTES'], errors='coerce')
-        df['RESCHEDULING_TIME'] = pd.to_numeric(df['RESCHEDULING_TIME'], errors='coerce')
-        df = df.dropna()
+        run_paths = [
+            os.path.join(folder_path, f)
+            for f in os.listdir(folder_path)
+            if f.lower().endswith((".csv", ".xlsx"))
+        ]
+        if not run_paths:
+            raise FileNotFoundError(f"No CSV/XLSX files found in: {folder_path}")
 
-        plt.figure(figsize=(10, 6))
-        plt.plot(df['ELAPSED_MINUTES'], df['RESCHEDULING_TIME'], marker='o', color='C0', linewidth=2)
+        runs_interp = []
+        x_grid = np.linspace(0.0, 1.0, 101)
 
-        plt.title(title)
-        plt.xlabel('Elapsed Minutes')
-        plt.ylabel('Rescheduling Time [min]')
-        plt.ylim(bottom=0)
-        plt.grid(True)
+        for p in sorted(run_paths):
+            df = pd.read_csv(p, sep=";", quotechar='"') if p.lower().endswith(".csv") else pd.read_excel(p)
+            df['ELAPSED_MINUTES'] = pd.to_numeric(df['ELAPSED_MINUTES'], errors='coerce')
+            df['RESCHEDULING_TIME'] = pd.to_numeric(df['RESCHEDULING_TIME'], errors='coerce')
+            df = df.dropna(subset=['ELAPSED_MINUTES', 'RESCHEDULING_TIME']).copy()
+            if df.empty or df['ELAPSED_MINUTES'].nunique() < 2:
+                continue
+
+            tmax = df['ELAPSED_MINUTES'].max()
+            if tmax <= 0:
+                continue
+            df['progress'] = df['ELAPSED_MINUTES'] / tmax
+            df = df.sort_values('progress').drop_duplicates(subset='progress', keep='last')
+
+            y_interp = np.interp(x_grid, df['progress'].values, df['RESCHEDULING_TIME'].values)
+            runs_interp.append(y_interp)
+
+        if not runs_interp:
+            raise ValueError("No valid runs after cleaning/interpolation.")
+
+        Y = np.vstack(runs_interp)
+        mean_y = np.mean(Y, axis=0)
+        std_y  = np.std(Y, axis=0, ddof=0)
+
+        lower_1, upper_1 = mean_y - std_y,   mean_y + std_y
+        lower_2, upper_2 = mean_y - 2*std_y, mean_y + 2*std_y
+
+        # Colors to match your residuals plot
+        base_blue = (0.121, 0.466, 0.705)   # same as 'C0' in Matplotlib
+        darker_blue = tuple(c * 0.6 for c in base_blue)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.fill_between(x_grid, lower_2, upper_2, color=base_blue,  alpha=0.35, label='±2 Std Dev (95%)')
+        ax.fill_between(x_grid, lower_1, upper_1, color=darker_blue, alpha=0.20, label='±1 Std Dev (68%)')
+        ax.plot(x_grid, mean_y, color=base_blue, marker='o', linewidth=2, label='Mean Rescheduling Time')
+
+        ax.set_title(title)
+        ax.set_xlabel('Fraction of Simulation Elapsed')
+        ax.set_ylabel('Rescheduling Time [sec]')
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(bottom=0)
+        ax.grid(True)
+        ax.legend()
 
         plt.tight_layout()
         plt.show()
+
 
 if __name__ == '__main__':
     benchmark = Benchmarking(
@@ -418,4 +468,5 @@ if __name__ == '__main__':
 
     # Plot Delta(planned, actual) over percentage
     benchmark.visualize_reliability(benchmark.reliability_gbdt_df)
-    benchmark.visualize_rescheduling_curve(rescheduling_path="Simulation_output/Rescheduling_time.csv", title="Rescheduling Time over Elapsed Minutes")
+    benchmark.visualize_rescheduling_curve(folder_path="Simulation_output/Rescheduling time 24 jan",
+                                            title="Rescheduling Time vs. Simulation Progress")

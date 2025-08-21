@@ -18,11 +18,11 @@ from sklearn.metrics import (
 import shap
 import matplotlib.pyplot as plt
 import time
-from scipy.stats import permutation_test
 from scipy.stats import ttest_rel
 import matplotlib.colors as mcolors
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
+from sklearn.model_selection import train_test_split
 
 
 def _mape_ignore_zero(y_true, y_pred):
@@ -146,8 +146,8 @@ class GBDT_Model:
             max_iter=self.param['regressor__max_iter'],
             learning_rate=self.param['regressor__learning_rate'],
             max_depth=5,
-            early_stopping=True,
-            validation_fraction=0.1,
+            early_stopping=False,              # so we see the full curve
+            scoring=None,                      # avoid internal scoring override
             random_state=self.random_state
         )
         pipe = Pipeline([
@@ -676,24 +676,91 @@ class GBDT_Model:
             f"\n  ▸ inference time       : {elapsed:.4f} seconds"
         )
 
+    def plot_error_vs_iterations(self, use_active_model=True):
+        """
+        Plot training and validation RMSE over boosting iterations (epochs).
+        Uses the training split with an internal validation set.
+        """
+        # Select the right dataset
+        if use_active_model:
+            df = self.df_train_active.copy()
+            drop_cols = ['PLANNED_FRAME_STACK_ID','PLANNED_TOTE_ID','START_PICKING_TS',
+                        'END_PICKING_TS','TRUCK_TRIP_ID','PICK_DATE']
+            label = "Active"
+        else:
+            df = self.df_train_inactive.copy()
+            drop_cols = ['PLANNED_FRAME_STACK_ID','PLANNED_TOTE_ID','START_PICKING_TS',
+                        'END_PICKING_TS','TRUCK_TRIP_ID','PICK_DATE',
+                        'TIME_OF_DAY_MINS','NR_OF_PICKERS','NR_OF_PICKS']
+            label = "Inactive"
+
+        df = df[df['REMAINING_PICKING_TIME'] <= self.remaining_time_cap]
+        X, y = self._get_feature_targets(df, drop_cols)
+
+        # Split off validation set
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.2, random_state=self.random_state
+        )
+
+        # Preprocessor and raw booster
+        preproc = ColumnTransformer([
+            ('num', StandardScaler(), X_train.select_dtypes(include=['number']).columns.tolist()),
+            ('cat', OneHotEncoder(handle_unknown='ignore'), X_train.select_dtypes(include=['object']).columns.tolist())
+        ])
+        booster = HistGradientBoostingRegressor(
+            max_iter=self.param['regressor__max_iter'],
+            learning_rate=self.param['regressor__learning_rate'],
+            max_depth=5,
+            early_stopping=False,
+            random_state=self.random_state
+        )
+
+        # Fit on preprocessed data
+        X_train_t = preproc.fit_transform(X_train)
+        X_val_t   = preproc.transform(X_val)
+        booster.fit(X_train_t, y_train)
+
+        train_rmse = []
+        val_rmse = []
+        for y_pred_train, y_pred_val in zip(
+            booster.staged_predict(X_train_t),
+            booster.staged_predict(X_val_t)
+        ):
+            train_rmse.append(np.sqrt(mean_squared_error(y_train, y_pred_train)))
+            val_rmse.append(np.sqrt(mean_squared_error(y_val, y_pred_val)))
+
+        # Plot
+        plt.figure(figsize=(8,6))
+        plt.plot(range(1, len(train_rmse)+1), train_rmse, label="Train RMSE")
+        plt.plot(range(1, len(val_rmse)+1),   val_rmse,   label="Val RMSE")
+        plt.xlabel("Boosting Iterations")
+        plt.ylabel("RMSE [min]")
+        plt.title(f"{label} – Error vs Iterations")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+
+
 # Example usage
 if __name__ == '__main__':
     gbdt = GBDT_Model(
         big_csv_path='Data/Training/Features_all_dates.csv',
         use_gridsearchcv=False,
-        use_kfold_insights=True,
+        use_kfold_insights=False,
         param_grid={
             'regressor__max_iter': [100, 200, 300],
             'regressor__learning_rate': [0.05, 0.1, 0.3]
         },
         param={
-            'regressor__max_iter': 200,
+            'regressor__max_iter': 1000,
             'regressor__learning_rate': 0.1
         }
     )
 
     # Train and save models
-    #gbdt.train_models()
+    gbdt.train_models()
 
     # Evaluate on the held-out evaluation split
     gbdt.evaluate()
@@ -708,3 +775,7 @@ if __name__ == '__main__':
     gbdt.explain_with_shap(n_samples=2000)
 
     gbdt.infer_row(row_idx=1234, use_active_model=False)
+
+    gbdt.plot_error_vs_iterations(use_active_model=True) #active model
+    gbdt.plot_error_vs_iterations(use_active_model=False) #inactive model
+
